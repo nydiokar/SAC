@@ -3,6 +3,7 @@ import os from "os"
 import * as path from "path"
 import { arePathsEqual } from "../../utils/path"
 
+
 export async function listFiles(dirPath: string, recursive: boolean, limit: number): Promise<[string[], boolean]> {
 	const absolutePath = path.resolve(dirPath)
 	// Do not allow listing files in root or home directory, which cline tends to want to do when the user's prompt is vague.

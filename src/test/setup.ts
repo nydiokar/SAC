@@ -6,11 +6,13 @@ export async function run(): Promise<void> {
     // Create the mocha test
     const mocha = new Mocha({
         ui: 'bdd',
-        color: true
+        color: true,
+        require: ['ts-node/register', 'tsconfig-paths/register']  // Add this
     });
 
     const testsRoot = path.resolve(__dirname, '..');
-    const files = await glob('**/*.test.js', { cwd: testsRoot });
+    // Change this to look for .test.ts files instead of .test.js
+    const files = await glob('**/*.test.ts', { cwd: testsRoot });
 
     // Add files to the test suite
     files.forEach(f => mocha.addFile(path.resolve(testsRoot, f)));

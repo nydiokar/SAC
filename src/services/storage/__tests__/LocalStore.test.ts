@@ -1,7 +1,9 @@
+import { describe, it, beforeEach, afterEach } from 'mocha';
 import { LocalStore, OperationPattern } from '../LocalStore';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import should from 'should';
 
 describe('LocalStore', () => {
   let store: LocalStore;
@@ -21,7 +23,7 @@ describe('LocalStore', () => {
     }
   });
 
-  test('should store and retrieve a pattern', () => {
+  it('should store and retrieve a pattern', () => {
     const pattern: Omit<OperationPattern, 'id'> = {
       pattern: 'test pattern',
       context: 'test context',
@@ -30,17 +32,22 @@ describe('LocalStore', () => {
     };
 
     const id = store.storePattern(pattern);
-    expect(id).toBeGreaterThan(0);
+    should(id).be.above(0);
 
     const retrieved = store.findSimilarPattern(pattern.pattern);
-    expect(retrieved).toBeTruthy();
-    expect(retrieved?.pattern).toBe(pattern.pattern);
-    expect(retrieved?.context).toBe(pattern.context);
-    expect(retrieved?.timestamp).toBe(pattern.timestamp);
-    expect(retrieved?.metadata).toEqual(pattern.metadata);
+    should(retrieved).not.be.null();
+    should(retrieved).not.be.undefined();
+    
+    // Now we can safely assert on the retrieved value
+    const nonNullRetrieved = retrieved as OperationPattern;
+    nonNullRetrieved.pattern.should.equal(pattern.pattern);
+    nonNullRetrieved.context.should.equal(pattern.context);
+    nonNullRetrieved.timestamp.should.equal(pattern.timestamp);
+    should(nonNullRetrieved.metadata).not.be.undefined();
+    should(nonNullRetrieved.metadata).eql(pattern.metadata);
   });
 
-  test('should find similar patterns', () => {
+  it('should find similar patterns', () => {
     const patterns = [
       {
         pattern: 'implement feature X',
@@ -57,11 +64,14 @@ describe('LocalStore', () => {
     patterns.forEach(p => store.storePattern(p));
 
     const similar = store.findSimilarPattern('implement feature');
-    expect(similar).toBeTruthy();
-    expect(similar?.pattern).toBe('implement feature Y'); // Should return most recent
+    should(similar).not.be.null();
+    should(similar).not.be.undefined();
+    
+    const nonNullSimilar = similar as OperationPattern;
+    nonNullSimilar.pattern.should.equal('implement feature Y'); // Should return most recent
   });
 
-  test('should find patterns with context hint', () => {
+  it('should find patterns with context hint', () => {
     const patterns = [
       {
         pattern: 'fix bug',
@@ -78,16 +88,20 @@ describe('LocalStore', () => {
     patterns.forEach(p => store.storePattern(p));
 
     const frontendBug = store.findSimilarPattern('fix bug', 'frontend');
-    expect(frontendBug).toBeTruthy();
-    expect(frontendBug?.context).toBe('frontend component');
+    should(frontendBug).not.be.null();
+    should(frontendBug).not.be.undefined();
+    const nonNullFrontendBug = frontendBug as OperationPattern;
+    nonNullFrontendBug.context.should.equal('frontend component');
 
     const backendBug = store.findSimilarPattern('fix bug', 'backend');
-    expect(backendBug).toBeTruthy();
-    expect(backendBug?.context).toBe('backend service');
+    should(backendBug).not.be.null();
+    should(backendBug).not.be.undefined();
+    const nonNullBackendBug = backendBug as OperationPattern;
+    nonNullBackendBug.context.should.equal('backend service');
   });
 
-  test('should return null for non-existent patterns', () => {
+  it('should return null for non-existent patterns', () => {
     const result = store.findSimilarPattern('non-existent pattern');
-    expect(result).toBeNull();
+    should(result).be.null();
   });
 });

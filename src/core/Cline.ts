@@ -3,6 +3,7 @@ import cloneDeep from "clone-deep"
 import delay from "delay"
 import fs from "fs/promises"
 import os from "os"
+import { ProjectContext, FileChange } from "../services/project-context/ProjectContext"
 import pWaitFor from "p-wait-for"
 import * as path from "path"
 import { serializeError } from "serialize-error"
@@ -83,6 +84,7 @@ export class Cline {
 	didFinishAborting = false
 	abandoned = false
 	private diffViewProvider: DiffViewProvider
+	private projectContext: ProjectContext
 
 	// streaming
 	private currentStreamingContentIndex = 0
@@ -113,14 +115,18 @@ export class Cline {
 		this.customInstructions = customInstructions
 		this.autoApprovalSettings = autoApprovalSettings
 		if (historyItem) {
-			this.taskId = historyItem.id
-			this.resumeTaskFromHistory()
-		} else if (task || images) {
-			this.taskId = Date.now().toString()
-			this.startTask(task, images)
-		} else {
-			throw new Error("Either historyItem or task/images must be provided")
-		}
+		this.taskId = historyItem.id
+		this.projectContext = new ProjectContext(cwd)
+		this.initializeProjectContext().catch(console.error) // Non-blocking initialization
+		this.resumeTaskFromHistory()
+	} else if (task || images) {
+		this.taskId = Date.now().toString()
+		this.projectContext = new ProjectContext(cwd)
+		this.initializeProjectContext().catch(console.error) // Non-blocking initialization
+		this.startTask(task, images)
+	} else {
+		throw new Error("Either historyItem or task/images must be provided")
+	}
 	}
 
 	// Storing task to disk for history
@@ -2569,6 +2575,22 @@ export class Cline {
 		])
 	}
 
+	private async initializeProjectContext() {
+		try {
+			await this.projectContext.analyze()
+		} catch (error) {
+			console.error('Failed to analyze project context:', error)
+		}
+	}
+
+	async handleFileChanges(changes: FileChange[]) {
+		try {
+			await this.projectContext.updateContext(changes)
+		} catch (error) {
+			console.error('Failed to update project context:', error)
+		}
+	}
+
 	async getEnvironmentDetails(includeFileDetails: boolean = false) {
 		let details = ""
 
@@ -2694,6 +2716,29 @@ export class Cline {
 				const result = formatResponse.formatFilesList(cwd, files, didHitLimit)
 				details += result
 			}
+		}
+
+		// Add project structure information if available
+		try {
+			const structure = this.projectContext.getStructure()
+			if (structure) {
+				details += '\n\n# Project Structure'
+				details += `\nRoot: ${structure.root}`
+				
+				if (structure.dependencies && Object.keys(structure.dependencies).length > 0) {
+					details += '\n\n## Dependencies'
+					Object.entries(structure.dependencies).forEach(([dep, version]) => {
+						details += `\n${dep}: ${version}`
+					})
+				}
+
+				details += '\n\n## Files'
+				Array.from(structure.files.entries()).forEach(([filePath, info]) => {
+					details += `\n${filePath} (${info.type})`
+				})
+			}
+		} catch (error) {
+			console.error('Failed to get project structure:', error)
 		}
 
 		return `<environment_details>\n${details.trim()}\n</environment_details>`

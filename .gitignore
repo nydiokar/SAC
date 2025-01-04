@@ -8,6 +8,11 @@ node_modules/
 .pnp/
 .pnp.js
 
+src/**/*.js
+src/**/*.js.map
+src/**/*.test.js
+src/**/*.test.js.map
+
 # Testing
 coverage/
 .vscode-test/

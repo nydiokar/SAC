@@ -6,9 +6,9 @@
 	// compiled to make them compatible with VS Code's test runner.
 	"extends": "./tsconfig.json",
 	"compilerOptions": {
-		"module": "commonjs",
-		"moduleResolution": "node",
-		"types": ["node", "mocha", "should", "vscode", "jest"]
+		"types": ["node", "mocha", "should", "vscode", "chai"],
+		"module": "CommonJS",
+		"moduleResolution": "node"
 	},
 	"include": ["src/**/*.test.ts"]
 }
