@@ -63,42 +63,56 @@ export class LocalStore {
   }
 
   public findSimilarPattern(pattern: string, contextHint?: string): OperationPattern | null {
+    // Get all patterns for the context
     let query = `
       SELECT id, pattern, context, timestamp, metadata
       FROM operation_patterns
-      WHERE pattern LIKE @pattern
+      WHERE 1=1
     `;
 
-    const params: any = {
-      pattern: `%${pattern}%`
-    };
+    const params: any = {};
 
     if (contextHint) {
       query += ` AND context LIKE @context`;
       params.context = `%${contextHint}%`;
     }
 
-    query += ` ORDER BY timestamp DESC LIMIT 1`;
-
     const stmt = this.db.prepare(query);
-    const result = stmt.get(params) as {
+    const patterns = stmt.all(params) as Array<{
       id: number;
       pattern: string;
       context: string;
       timestamp: number;
       metadata: string | null;
-    } | undefined;
+    }>;
 
-    if (!result) {
-      return null;
+    // Find best match using word similarity
+    let bestMatch = null;
+    let highestSimilarity = 0;
+
+    const patternWords = new Set(pattern.toLowerCase().split(/\s+/));
+
+    for (const p of patterns) {
+      const currentWords = new Set(p.pattern.toLowerCase().split(/\s+/));
+      const intersection = new Set([...patternWords].filter(x => currentWords.has(x)));
+      const similarity = intersection.size / Math.max(patternWords.size, currentWords.size);
+
+      if (similarity > highestSimilarity && similarity >= 0.5) { // Lower threshold to 0.5
+        highestSimilarity = similarity;
+        bestMatch = p;
+      }
+    }
+
+    if (!bestMatch) {
+        return null;
     }
 
     return {
-      id: result.id,
-      pattern: result.pattern,
-      context: result.context,
-      timestamp: result.timestamp,
-      metadata: result.metadata ? JSON.parse(result.metadata) : undefined
+      id: bestMatch.id,
+      pattern: bestMatch.pattern,
+      context: bestMatch.context,
+      timestamp: bestMatch.timestamp,
+      metadata: bestMatch.metadata ? JSON.parse(bestMatch.metadata) : undefined
     };
   }
 

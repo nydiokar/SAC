@@ -1,32 +1,36 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
-import delay from "delay"
-import * as vscode from "vscode"
-import { ClineProvider } from "./core/webview/ClineProvider"
-import { createClineAPI } from "./exports"
-import "./utils/path" // necessary to have access to String.prototype.toPosix
-import { DIFF_VIEW_URI_SCHEME } from "./integrations/editor/DiffViewProvider"
+import * as vscode from 'vscode';
+import delay from 'delay';
+import { ProjectContext } from './services/project-context/ProjectContext';
+import { LocalStore } from './services/storage/LocalStore';
+import { ClineProvider } from './core/webview/ClineProvider';
+import { ApiConfiguration } from './shared/api';
+import { AutoApprovalSettings } from './shared/AutoApprovalSettings';
+import { EDITOR_SCHEME } from './integrations/editor/constants';
+import { createClineAPI } from './exports/index';
 
-/*
-Built using https://github.com/microsoft/vscode-webview-ui-toolkit
 
-Inspired by
-https://github.com/microsoft/vscode-webview-ui-toolkit-samples/tree/main/default/weather-webview
-https://github.com/microsoft/vscode-webview-ui-toolkit-samples/tree/main/frameworks/hello-world-react-cra
 
-*/
-
-let outputChannel: vscode.OutputChannel
-
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
-export function activate(context: vscode.ExtensionContext) {
-	outputChannel = vscode.window.createOutputChannel("Cline")
+export async function activate(context: vscode.ExtensionContext) {
+	const projectContext = new ProjectContext("test" as string);
+	const localStore = new LocalStore("test" as string);
+	const apiConfiguration = {} as ApiConfiguration;
+	const autoApprovalSettings = {} as AutoApprovalSettings;
+	
+	const provider = new ClineProvider(
+		context,
+    	apiConfiguration,
+    	autoApprovalSettings,
+    	projectContext,
+    	localStore,
+    	undefined
+);
+	
+	const outputChannel = vscode.window.createOutputChannel("Cline")
 	context.subscriptions.push(outputChannel)
 
 	outputChannel.appendLine("Cline extension activated")
 
-	const sidebarProvider = new ClineProvider(context, outputChannel)
+	const sidebarProvider = new ClineProvider(context, apiConfiguration, autoApprovalSettings, projectContext, localStore, undefined)
 
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(ClineProvider.sideBarId, sidebarProvider, {
@@ -53,7 +57,7 @@ export function activate(context: vscode.ExtensionContext) {
 		outputChannel.appendLine("Opening Cline in new tab")
 		// (this example uses webviewProvider activation event which is necessary to deserialize cached webview, but since we use retainContextWhenHidden, we don't need to use that event)
 		// https://github.com/microsoft/vscode-extension-samples/blob/main/webview-sample/src/extension.ts
-		const tabProvider = new ClineProvider(context, outputChannel)
+		const tabProvider = new ClineProvider(context, apiConfiguration, autoApprovalSettings, projectContext, localStore, undefined)
 		//const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : undefined
 		const lastCol = Math.max(...vscode.window.visibleTextEditors.map((editor) => editor.viewColumn || 0))
 
@@ -111,7 +115,7 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	})()
 	context.subscriptions.push(
-		vscode.workspace.registerTextDocumentContentProvider(DIFF_VIEW_URI_SCHEME, diffContentProvider),
+		vscode.workspace.registerTextDocumentContentProvider(EDITOR_SCHEME, diffContentProvider),
 	)
 
 	// URI Handler
@@ -140,6 +144,10 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 // This method is called when your extension is deactivated
-export function deactivate() {
-	outputChannel.appendLine("Cline extension deactivated")
-}
+export const OutputChannel = {
+    appendLine: (line: string) => {},
+    append: (text: string) => {},
+    show: () => {},
+    dispose: () => {}
+};
+

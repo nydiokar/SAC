@@ -4,6 +4,7 @@ import delay from "delay"
 import fs from "fs/promises"
 import os from "os"
 import { ProjectContext, FileChange } from "../services/project-context/ProjectContext"
+import { LocalStore, OperationPattern } from "../services/storage/LocalStore"
 import pWaitFor from "p-wait-for"
 import * as path from "path"
 import { serializeError } from "serialize-error"
@@ -53,6 +54,7 @@ import { ClineProvider, GlobalFileNames } from "./webview/ClineProvider"
 import { showSystemNotification } from "../integrations/notifications"
 import { removeInvalidChars } from "../utils/string"
 import { fixModelHtmlEscaping } from "../utils/string"
+import { IVSCodeInterface } from "../services/vscode/VSCodeInterface"
 
 const cwd =
 	vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath).at(0) ?? path.join(os.homedir(), "Desktop") // may or may not exist but fs checking existence would immediately ask for permission which would be bad UX, need to come up with a better solution
@@ -65,9 +67,9 @@ type UserContent = Array<
 export class Cline {
 	readonly taskId: string
 	api: ApiHandler
-	private terminalManager: TerminalManager
-	private urlContentFetcher: UrlContentFetcher
-	private browserSession: BrowserSession
+	private terminalManager!: TerminalManager
+	private urlContentFetcher!: UrlContentFetcher
+	private browserSession!: BrowserSession
 	private didEditFile: boolean = false
 	customInstructions?: string
 	autoApprovalSettings: AutoApprovalSettings
@@ -83,8 +85,141 @@ export class Cline {
 	private abort: boolean = false
 	didFinishAborting = false
 	abandoned = false
-	private diffViewProvider: DiffViewProvider
+	private diffViewProvider!: DiffViewProvider
 	private projectContext: ProjectContext
+	private localStore: LocalStore
+	private vscodeInterface: IVSCodeInterface
+
+	constructor(
+		provider: ClineProvider,
+		apiConfiguration: ApiConfiguration,
+		autoApprovalSettings: AutoApprovalSettings,
+		vscodeInterface: IVSCodeInterface,
+		projectContext: ProjectContext,
+		localStore: LocalStore,
+		customInstructions?: string,
+		task?: string,
+		images?: string[],
+		historyItem?: HistoryItem,
+	) {
+		this.providerRef = new WeakRef(provider);
+		this.api = buildApiHandler(apiConfiguration);
+		this.autoApprovalSettings = autoApprovalSettings;
+		this.vscodeInterface = vscodeInterface;
+		this.projectContext = projectContext;
+		this.localStore = localStore;
+		this.customInstructions = customInstructions;
+
+		// Initialize required services
+		this.initializeServices()
+
+		if (historyItem) {
+			this.taskId = historyItem.id;
+			this.initializeProjectContext().catch(console.error);
+			this.resumeTaskFromHistory();
+		} else if (task || images) {
+			this.taskId = Date.now().toString();
+			this.startTask(task, images);
+		} else {
+			throw new Error("Either historyItem or task/images must be provided");
+		}
+	}
+
+	private initializeServices(): void {
+		this.terminalManager = new TerminalManager()
+		this.urlContentFetcher = new UrlContentFetcher(this.vscodeInterface.context)
+		this.browserSession = new BrowserSession(this.vscodeInterface.context)
+		this.diffViewProvider = new DiffViewProvider(cwd)
+	}
+
+	/**
+	 * Searches for a similar task pattern in the history
+	 * @param task The task to find matches for
+	 * @returns The matching pattern if found, null otherwise
+	 */
+	private async findSimilarTask(task: string): Promise<OperationPattern | null> {
+		const contextHint = this.projectContext.getCurrentContext()
+		return this.localStore.findSimilarPattern(task, contextHint)
+	}
+
+	/**
+	 * Learns from successful API execution by storing the pattern
+	 * @param task Original task
+	 * @param result Execution result/context
+	 */
+	private async learnFromExecution(task: string, context: string): Promise<void> {
+		await this.localStore.storePattern({
+			pattern: task,
+			context: context,
+			timestamp: Date.now()
+		})
+	}
+
+	/**
+	 * Execute a task locally based on a similar pattern found
+	 * @param task Current task to execute
+	 * @param pattern Similar pattern found in history
+	 */
+	private async executeLocally(task: string, pattern: OperationPattern): Promise<void> {
+		try {
+			await this.say("text", `Found similar task pattern. Using context from previous execution.`)
+			
+			// For now, we'll still use the API but with the context from the similar pattern
+			// This helps provide better context to the model
+			await this.initiateTaskLoop([
+				{
+					type: "text",
+					text: `<task>\n${task}\n</task>\n\nContext from similar task:\n${pattern.context}`
+				}
+			])
+		} catch (error) {
+			console.error('Error executing locally:', error)
+			// Fallback to API execution if local execution fails
+			await this.executeWithAPI(task)
+		}
+	}
+
+	/**
+	 * Execute a task using the API without any additional context
+	 * @param task Task to execute
+	 */
+	private async executeWithAPI(task: string): Promise<void> {
+		await this.initiateTaskLoop([{
+			type: "text",
+			text: `<task>\n${task}\n</task>`
+		}])
+	}
+
+	/**
+	 * Handles a given task by first checking for similar patterns in LocalStore
+	 * and executing locally if found, otherwise falling back to API execution
+	 * @param task The task to handle
+	 */
+	async handleTask(task: string): Promise<void> {
+		try {
+			// First try to find a similar task pattern
+			const similarPattern = await this.findSimilarTask(task)
+			
+			if (similarPattern) {
+				// Found similar pattern, execute with context
+				await this.executeLocally(task, similarPattern)
+			} else {
+				// No similar pattern found, fallback to API
+				await this.executeWithAPI(task)
+				
+				// Learn from this execution for future use
+				const newContext = this.projectContext.getCurrentContext()
+				await this.learnFromExecution(task, newContext)
+			}
+		} catch (error) {
+			console.error('Error handling task:', error)
+			await this.executeWithAPI(task) // Fallback to API on error
+			
+			// Still try to learn from error cases
+			const newContext = this.projectContext.getCurrentContext()
+			await this.learnFromExecution(task, newContext)
+		}
+	}
 
 	// streaming
 	private currentStreamingContentIndex = 0
@@ -97,42 +232,10 @@ export class Cline {
 	private didAlreadyUseTool = false
 	private didCompleteReadingStream = false
 
-	constructor(
-		provider: ClineProvider,
-		apiConfiguration: ApiConfiguration,
-		autoApprovalSettings: AutoApprovalSettings,
-		customInstructions?: string,
-		task?: string,
-		images?: string[],
-		historyItem?: HistoryItem,
-	) {
-		this.providerRef = new WeakRef(provider)
-		this.api = buildApiHandler(apiConfiguration)
-		this.terminalManager = new TerminalManager()
-		this.urlContentFetcher = new UrlContentFetcher(provider.context)
-		this.browserSession = new BrowserSession(provider.context)
-		this.diffViewProvider = new DiffViewProvider(cwd)
-		this.customInstructions = customInstructions
-		this.autoApprovalSettings = autoApprovalSettings
-		if (historyItem) {
-		this.taskId = historyItem.id
-		this.projectContext = new ProjectContext(cwd)
-		this.initializeProjectContext().catch(console.error) // Non-blocking initialization
-		this.resumeTaskFromHistory()
-	} else if (task || images) {
-		this.taskId = Date.now().toString()
-		this.projectContext = new ProjectContext(cwd)
-		this.initializeProjectContext().catch(console.error) // Non-blocking initialization
-		this.startTask(task, images)
-	} else {
-		throw new Error("Either historyItem or task/images must be provided")
-	}
-	}
-
 	// Storing task to disk for history
 
 	private async ensureTaskDirectoryExists(): Promise<string> {
-		const globalStoragePath = this.providerRef.deref()?.context.globalStorageUri.fsPath
+		const globalStoragePath = this.vscodeInterface.context.globalStorageUri.fsPath;
 		if (!globalStoragePath) {
 			throw new Error("Global storage uri is invalid")
 		}
@@ -874,7 +977,6 @@ export class Cline {
 		// this delegates to another generator or iterable object. In this case, it's saying "yield all remaining values from this iterator". This effectively passes along all subsequent chunks from the original stream.
 		yield* iterator
 	}
-
 	async presentAssistantMessage() {
 		if (this.abort) {
 			throw new Error("Cline instance aborted")
@@ -909,7 +1011,7 @@ export class Cline {
 					// (have to do this for partial and complete since sending content in thinking tags to markdown renderer will automatically be removed)
 					// Remove end substrings of <thinking or </thinking (below xml parsing is only for opening tags)
 					// (this is done with the xml parsing below now, but keeping here for reference)
-					// content = content.replace(/<\/?t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?$/, "")
+					// content = content.replace(/<\/?t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?$/, "")
 					// Remove all instances of <thinking> (with optional line break after) and </thinking> (with optional line break before)
 					// - Needs to be separate since we dont want to remove the line break before the first tag
 					// - Needs to happen before the xml parsing below
@@ -2591,11 +2693,9 @@ export class Cline {
 		])
 	}
 
-	private async initializeProjectContext() {
-		try {
-			await this.projectContext.analyze()
-		} catch (error) {
-			console.error('Failed to analyze project context:', error)
+	private async initializeProjectContext(): Promise<void> {
+		if (this.projectContext) {
+			await this.projectContext.initialize();
 		}
 	}
 
@@ -2612,10 +2712,8 @@ export class Cline {
 
 		// It could be useful for cline to know if the user went from one or no file to another between messages, so we always include this context
 		details += "\n\n# VSCode Visible Files"
-		const visibleFiles = vscode.window.visibleTextEditors
-			?.map((editor) => editor.document?.uri?.fsPath)
-			.filter(Boolean)
-			.map((absolutePath) => path.relative(cwd, absolutePath).toPosix())
+		const visibleFiles = this.vscodeInterface.getVisibleTextEditors()
+			.map(editor => path.relative(this.vscodeInterface.getWorkspacePath(), editor.fsPath).toPosix())
 			.join("\n")
 		if (visibleFiles) {
 			details += `\n${visibleFiles}`
@@ -2760,3 +2858,4 @@ export class Cline {
 		return `<environment_details>\n${details.trim()}\n</environment_details>`
 	}
 }
+
