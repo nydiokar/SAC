@@ -145,9 +145,9 @@
 		"build:webview": "cd webview-ui && npm run build",
 		"test:webview": "cd webview-ui && npm run test",
 		"publish:marketplace": "vsce publish && ovsx publish",
-		"test": "tsc -p tsconfig.test.json && mocha \"out/src/services/project-context/__tests__/ProjectContext.test.js\" \"out/src/core/__tests__/Cline.integration.test.js\"",
-		"test:watch": "ts-mocha \"src/**/*.test.ts\" --require ts-node/register --watch --watch-files src/**/*.ts --timeout 10000"
-	},
+        "test": "ts-mocha -p tsconfig.test.json --require ts-node/register -r tsconfig-paths/register \"src/core/__tests__/Cline.integration.test.ts\"",
+        "test:watch": "ts-mocha -p tsconfig.test.json --require ts-node/register -r tsconfig-paths/register \"src/**/*.test.ts\" --watch --watch-files src/**/*.ts --timeout 10000"
+    },
 	"devDependencies": {
 		"@types/better-sqlite3": "^7.6.12",
 		"@types/chai": "^4.3.0",

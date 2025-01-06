@@ -1279,9 +1279,17 @@ export class Cline {
 									}
 								}
 
-								const { newProblemsMessage, userEdits, finalContent } =
+								const { newProblemsMessage, userEdits, finalContent } = 
 									await this.diffViewProvider.saveChanges()
 								this.didEditFile = true // used to determine if we should wait for busy terminal to update before sending api request
+								
+								// Update project context with file changes
+								await this.handleFileChanges([{
+									filePath: relPath,
+									type: fileExists ? 'modified' : 'created',
+									content: finalContent
+								}]);
+
 								if (userEdits) {
 									await this.say(
 										"user_feedback_diff",
@@ -1369,6 +1377,14 @@ export class Cline {
 								}
 								// now execute the tool like normal
 								const content = await extractTextFromFile(absolutePath)
+								
+								// Update project context with file read
+								await this.handleFileChanges([{
+									filePath: relPath,
+									type: 'read', // We use modified since reading doesn't change the file but updates our context
+									content: content
+								}]);
+								
 								pushToolResult(content)
 								break
 							}
@@ -2583,7 +2599,7 @@ export class Cline {
 		}
 	}
 
-	async handleFileChanges(changes: FileChange[]) {
+	private async handleFileChanges(changes: FileChange[]) {
 		try {
 			await this.projectContext.updateContext(changes)
 		} catch (error) {

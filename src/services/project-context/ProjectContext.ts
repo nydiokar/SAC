@@ -12,7 +12,7 @@ export interface FileChange {
   /**
    * The type of change that occurred
    */
-  type: 'created' | 'modified' | 'deleted';
+  type: 'created' | 'modified' | 'deleted' | 'read';
   /**
    * Optional new content of the file
    */
@@ -89,6 +89,7 @@ export class ProjectContext {
       switch (change.type) {
         case 'created':
         case 'modified':
+        case 'read':
           const stats = await fs.stat(absolutePath);
           this.structure.files.set(change.filePath, {
             lastModified: stats.mtime,

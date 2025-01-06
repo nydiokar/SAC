@@ -6,9 +6,20 @@
 	// compiled to make them compatible with VS Code's test runner.
 	"extends": "./tsconfig.json",
 	"compilerOptions": {
-		"types": ["node", "mocha", "should", "vscode", "chai"],
+		"types": ["node", "mocha", "should", "vscode", "chai", "sinon"],
 		"module": "CommonJS",
-		"moduleResolution": "node"
+		"moduleResolution": "node",
+		"baseUrl": ".",
+		"paths": {
+			"*": ["src/*"]
+		}
 	},
-	"include": ["src/**/*.test.ts"]
+	"include": ["src/**/*.test.ts", "src/**/__tests__/**/*.ts"],
+	"ts-node": {
+		"files": true,
+		"transpileOnly": true,
+		"compilerOptions": {
+			"module": "CommonJS"
+		}
+	}
 }
