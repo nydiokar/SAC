@@ -226,4 +226,19 @@ export class ProjectContext {
       }
     }
   }
+
+  /**
+   * Gets the list of file changes that occurred during the current session
+   */
+  public getFileChanges(): FileChange[] {
+    const changes: FileChange[] = [];
+    this.structure.files.forEach((info, filePath) => {
+      changes.push({
+        filePath,
+        type: 'read',  // Default to read since we're just getting current state
+        content: undefined  // We don't load content by default
+      });
+    });
+    return changes;
+  }
 }

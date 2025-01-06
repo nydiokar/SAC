@@ -178,7 +178,11 @@ describe('Task Pattern Matching and Execution', function() {
             // Don't re-stub getCurrentContext since it's already stubbed in beforeEach
             const storePatternSpy = sandbox.spy(localStore, 'storePattern');
             
-            await cline['learnFromExecution'](task, context);
+            await cline['learnFromExecution'](task, {
+                status: 'success',
+                fileChanges: [],
+                userFeedback: 'Great job!'
+            });
 
             expect(storePatternSpy.calledOnce).to.be.true;
             const storedPattern = storePatternSpy.firstCall.args[0];

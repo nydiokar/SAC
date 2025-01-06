@@ -116,7 +116,32 @@ export class LocalStore {
     };
   }
 
-  public close(): void {
+  public findAllPatterns(pattern: string): OperationPattern[] {
+    const stmt = this.db.prepare(`
+      SELECT id, pattern, context, timestamp, metadata
+      FROM operation_patterns
+      WHERE pattern = @pattern
+      ORDER BY timestamp DESC
+    `);
+
+    const patterns = stmt.all({ pattern }) as Array<{
+      id: number;
+      pattern: string;
+      context: string;
+      timestamp: number;
+      metadata: string | null;
+    }>;
+
+    return patterns.map(p => ({
+      id: p.id,
+      pattern: p.pattern,
+      context: p.context,
+      timestamp: p.timestamp,
+      metadata: p.metadata ? JSON.parse(p.metadata) : undefined
+    }));
+  }
+
+  public async close(): Promise<void> {
     this.db.close();
   }
 }

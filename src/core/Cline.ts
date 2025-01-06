@@ -64,6 +64,13 @@ type UserContent = Array<
 	Anthropic.TextBlockParam | Anthropic.ImageBlockParam | Anthropic.ToolUseBlockParam | Anthropic.ToolResultBlockParam
 >
 
+export interface ExecutionResult {
+	status: 'success' | 'error';
+	fileChanges?: FileChange[];
+	error?: string;
+	userFeedback?: string;
+}
+
 export class Cline {
 	readonly taskId: string
 	api: ApiHandler
@@ -143,16 +150,71 @@ export class Cline {
 	}
 
 	/**
-	 * Learns from successful API execution by storing the pattern
-	 * @param task Original task
-	 * @param result Execution result/context
+	 * Learns from execution by storing operation patterns and history
+	 * @param task The original task description
+	 * @param result The execution result containing status and context
 	 */
-	private async learnFromExecution(task: string, context: string): Promise<void> {
-		await this.localStore.storePattern({
-			pattern: task,
-			context: context,
-			timestamp: Date.now()
-		})
+	private async learnFromExecution(task: string, result: {
+		status: 'success' | 'error';
+		fileChanges?: FileChange[];
+		error?: string;
+		userFeedback?: string;
+	}): Promise<void> {
+		try {
+			// Build context information
+			const contextParts: string[] = [];
+			
+			// Add execution status and basic info
+			contextParts.push(`Status: ${result.status}`);
+
+			// Add file changes if present
+			if (result.fileChanges && result.fileChanges.length > 0) {
+				contextParts.push('\nFile Changes:');
+				result.fileChanges.forEach(change => {
+					contextParts.push(`- ${change.type}: ${change.filePath}`);
+				});
+			}
+
+			// Add error information if present
+			if (result.error) {
+				contextParts.push(`\nError Details: ${result.error}`);
+			}
+
+			// Get project context
+			const projectContext = this.projectContext.getCurrentContext();
+			if (projectContext) {
+				contextParts.push('\nProject Context:', projectContext);
+			}
+
+			// Store as operation pattern for future matching
+			await this.localStore.storePattern({
+				pattern: task,
+				context: contextParts.join('\n'),
+				timestamp: Date.now(),
+				metadata: {
+					status: result.status,
+					hasFileChanges: result.fileChanges && result.fileChanges.length > 0,
+					hasError: !!result.error
+				}
+			});
+
+			// If user feedback is provided, update the pattern
+			if (result.userFeedback) {
+				await this.localStore.storePattern({
+					pattern: task,
+					context: `User Feedback: ${result.userFeedback}`,
+					timestamp: Date.now(),
+					metadata: {
+						type: 'feedback',
+						feedback: result.userFeedback
+					}
+				});
+			}
+
+		} catch (error) {
+			console.error('Failed to store execution pattern:', error);
+			// Don't throw - we don't want to interrupt the main task flow
+		}
 	}
 
 	/**
@@ -197,27 +259,28 @@ export class Cline {
 	 */
 	async handleTask(task: string): Promise<void> {
 		try {
-			// First try to find a similar task pattern
-			const similarPattern = await this.findSimilarTask(task)
+			const similarPattern = await this.findSimilarTask(task);
 			
 			if (similarPattern) {
-				// Found similar pattern, execute with context
-				await this.executeLocally(task, similarPattern)
+				await this.executeLocally(task, similarPattern);
 			} else {
-				// No similar pattern found, fallback to API
-				await this.executeWithAPI(task)
+				await this.executeWithAPI(task);
 				
-				// Learn from this execution for future use
-				const newContext = this.projectContext.getCurrentContext()
-				await this.learnFromExecution(task, newContext)
+				// Fix: Pass proper ExecutionResult object
+				await this.learnFromExecution(task, {
+					status: 'success',
+					fileChanges: this.projectContext.getFileChanges()
+				});
 			}
 		} catch (error) {
-			console.error('Error handling task:', error)
-			await this.executeWithAPI(task) // Fallback to API on error
+			// Fix: Pass proper ExecutionResult object
+			await this.learnFromExecution(task, {
+				status: 'error',
+				error: error instanceof Error ? error.message : String(error),
+				fileChanges: this.projectContext.getFileChanges()
+			});
 			
-			// Still try to learn from error cases
-			const newContext = this.projectContext.getCurrentContext()
-			await this.learnFromExecution(task, newContext)
+			await this.executeWithAPI(task);
 		}
 	}
 
@@ -1011,7 +1074,7 @@ export class Cline {
 					// (have to do this for partial and complete since sending content in thinking tags to markdown renderer will automatically be removed)
 					// Remove end substrings of <thinking or </thinking (below xml parsing is only for opening tags)
 					// (this is done with the xml parsing below now, but keeping here for reference)
-					// content = content.replace(/<\/?t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?$/, "")
+					// content = content.replace(/<\/?t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?$/, "")
 					// Remove all instances of <thinking> (with optional line break after) and </thinking> (with optional line break before)
 					// - Needs to be separate since we dont want to remove the line break before the first tag
 					// - Needs to happen before the xml parsing below
@@ -2858,4 +2921,3 @@ export class Cline {
 		return `<environment_details>\n${details.trim()}\n</environment_details>`
 	}
 }
-
