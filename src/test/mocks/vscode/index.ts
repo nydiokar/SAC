@@ -130,3 +130,19 @@ export class EventEmitter<T> {
         this.handlers.forEach(h => h(data));
     }
 }
+
+export const vscode = {
+  workspace: {
+    createFileSystemWatcher: () => ({
+      onDidChange: () => ({ dispose: () => {} }),
+      onDidCreate: () => ({ dispose: () => {} }),
+      onDidDelete: () => ({ dispose: () => {} }),
+      dispose: () => {}
+    })
+  },
+  RelativePattern: class {
+    constructor(public base: string, public pattern: string) {}
+  }
+};
+
+export default vscode;

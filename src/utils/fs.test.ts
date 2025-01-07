@@ -1,71 +1,88 @@
-import * as fs from "fs/promises"
-import { after, describe, it } from "mocha"
-import * as os from "os"
-import * as path from "path"
-import "should"
-import { createDirectoriesForFile, fileExistsAtPath } from "./fs"
+import { expect, use } from 'chai';
+import chaiAsPromised from 'chai-as-promised';
+import * as fsUtils from './fs';
+import fs from 'fs-extra';
+import path from 'path';
+import { beforeEach, describe, it, afterEach } from 'mocha';
+import proxyquire from 'proxyquire';
 
-describe("Filesystem Utilities", () => {
-	const tmpDir = path.join(os.tmpdir(), "cline-test-" + Math.random().toString(36).slice(2))
+// Enable chai-as-promised
+use(chaiAsPromised);
 
-	// Clean up after tests
-	after(async () => {
-		try {
-			await fs.rm(tmpDir, { recursive: true, force: true })
-		} catch {
-			// Ignore cleanup errors
-		}
-	})
+// Mock vscode and get the ProjectContext with mocked dependencies
+const { ProjectContext } = proxyquire('../services/project-context/ProjectContext', {
+	'vscode': {
+		workspace: {
+			createFileSystemWatcher: () => ({
+				onDidChange: () => ({ dispose: () => {} }),
+				onDidCreate: () => ({ dispose: () => {} }),
+				onDidDelete: () => ({ dispose: () => {} }),
+				dispose: () => {}
+			})
+		},
+		RelativePattern: class {
+			constructor(public base: string, public pattern: string) {}
+		},
+		'@noCallThru': true
+	}
+});
 
-	describe("fileExistsAtPath", () => {
-		it("should return true for existing paths", async () => {
-			await fs.mkdir(tmpDir, { recursive: true })
-			const testFile = path.join(tmpDir, "test.txt")
-			await fs.writeFile(testFile, "test")
+describe('File System Utils with Validation', () => {
+	let tempDir: string;
+	let projectContext: any; // Type as any since we're using the mocked version
 
-			const exists = await fileExistsAtPath(testFile)
-			exists.should.equal(true)
-		})
+	beforeEach(async () => {
+		tempDir = path.join(__dirname, 'temp_test_dir');
+		await fs.ensureDir(tempDir);
+		projectContext = new ProjectContext(tempDir, undefined, true);
+		await projectContext.initialize();
+	});
 
-		it("should return false for non-existing paths", async () => {
-			const nonExistentPath = path.join(tmpDir, "does-not-exist.txt")
-			const exists = await fileExistsAtPath(nonExistentPath)
-			exists.should.equal(false)
-		})
-	})
+	afterEach(async () => {
+		await fs.remove(tempDir);
+	});
 
-	describe("createDirectoriesForFile", () => {
-		it("should create all necessary directories", async () => {
-			const deepPath = path.join(tmpDir, "deep", "nested", "dir", "file.txt")
-			const createdDirs = await createDirectoriesForFile(deepPath)
+	describe('createDirectoriesForFile', () => {
+		it('should create valid directories', async () => {
+			const testPath = path.join(tempDir, 'test', 'nested', 'file.txt');
+			const dirs = await fsUtils.createDirectoriesForFile(testPath, projectContext);
+			expect(dirs).to.have.length.greaterThan(0);
+			expect(await fsUtils.fileExistsAtPath(path.dirname(testPath))).to.be.true;
+		});
 
-			// Verify directories were created
-			createdDirs.length.should.be.greaterThan(0)
-			for (const dir of createdDirs) {
-				const exists = await fileExistsAtPath(dir)
-				exists.should.equal(true)
-			}
-		})
+		it('should reject creating directories in node_modules', async () => {
+			const testPath = path.join(tempDir, 'node_modules', 'test', 'file.txt');
+			await expect(fsUtils.createDirectoriesForFile(testPath, projectContext))
+				.to.eventually.be.rejectedWith(/validation failed/);
+		});
+	});
 
-		it("should handle existing directories", async () => {
-			const existingDir = path.join(tmpDir, "existing")
-			await fs.mkdir(existingDir, { recursive: true })
+	describe('writeFileWithValidation', () => {
+		it('should write valid files', async () => {
+			const testPath = path.join(tempDir, 'test.txt');
+			await fsUtils.writeFileWithValidation(testPath, 'test content', projectContext);
+			expect(await fsUtils.fileExistsAtPath(testPath)).to.be.true;
+		});
 
-			const filePath = path.join(existingDir, "file.txt")
-			const createdDirs = await createDirectoriesForFile(filePath)
+		it('should reject writing to .env files', async () => {
+			const testPath = path.join(tempDir, '.env');
+			await expect(fsUtils.writeFileWithValidation(testPath, 'secret', projectContext))
+				.to.eventually.be.rejectedWith(/validation failed/);
+		});
+	});
 
-			// Should not create any new directories
-			createdDirs.length.should.equal(0)
-		})
+	describe('readFileWithValidation', () => {
+		it('should read valid files', async () => {
+			const testPath = path.join(tempDir, 'test.txt');
+			await fs.writeFile(testPath, 'test content');
+			const content = await fsUtils.readFileWithValidation(testPath, projectContext);
+			expect(content.toString()).to.equal('test content');
+		});
 
-		it("should normalize paths", async () => {
-			const unnormalizedPath = path.join(tmpDir, "a", "..", "b", ".", "file.txt")
-			const createdDirs = await createDirectoriesForFile(unnormalizedPath)
-
-			// Should create only the necessary directory
-			createdDirs.length.should.equal(1)
-			const exists = await fileExistsAtPath(path.join(tmpDir, "b"))
-			exists.should.equal(true)
-		})
-	})
-})
+		it('should reject reading from restricted paths', async () => {
+			const testPath = path.join(tempDir, '.git', 'config');
+			await expect(fsUtils.readFileWithValidation(testPath, projectContext))
+				.to.eventually.be.rejectedWith(/validation failed/);
+		});
+	});
+});

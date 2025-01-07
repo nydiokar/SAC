@@ -1,6 +1,8 @@
 import * as path from 'path';
 import { promises as fs } from 'fs';
 import * as vscode from 'vscode';
+import { Minimatch } from 'minimatch';
+import { LocalStore } from '../storage/LocalStore';
 
 /**
  * Represents a change in a file within the project
@@ -43,13 +45,34 @@ export interface ProjectStructure {
   };
 }
 
+interface ValidationResult {
+  isValid: boolean;
+  reason?: string;
+}
+
+interface ValidationRule {
+  pattern: string;
+  isAllowed: boolean;
+  description: string;
+}
+
 /**
  * Manages project context and analysis
  */
 export class ProjectContext {
   private structure: ProjectStructure;
+  private readonly defaultRestrictions: ValidationRule[] = [
+    { pattern: 'node_modules/**', isAllowed: false, description: 'Restricted system directory' },
+    { pattern: '.env*', isAllowed: false, description: 'Sensitive environment files' },
+    { pattern: '.git/**', isAllowed: false, description: 'Git system directory' },
+    { pattern: '**/*.{ts,js,json,md,txt,yml,yaml}', isAllowed: true, description: 'Common project files' }
+  ];
 
-  constructor(private workspacePath: string) {
+  constructor(
+    private workspacePath: string, 
+    private localStore?: LocalStore,
+    private isTestEnvironment: boolean = false
+  ) {
     this.structure = {
       root: workspacePath,
       files: new Map()
@@ -67,32 +90,34 @@ export class ProjectContext {
         // Perform initial project analysis
         await this.analyze();
 
-        // Set up file watchers for project changes
-        const watcher = vscode.workspace.createFileSystemWatcher(
-            new vscode.RelativePattern(this.workspacePath, '**/*')
-        );
+        // Only set up file watchers if we're not in test environment
+        if (!this.isTestEnvironment) {
+            const watcher = vscode.workspace.createFileSystemWatcher(
+                new vscode.RelativePattern(this.workspacePath, '**/*')
+            );
 
-        // Handle file changes
-        watcher.onDidChange(async uri => {
-            await this.updateContext([{
-                filePath: path.relative(this.workspacePath, uri.fsPath),
-                type: 'modified'
-            }]);
-        });
+            // Handle file changes
+            watcher.onDidChange(async uri => {
+                await this.updateContext([{
+                    filePath: path.relative(this.workspacePath, uri.fsPath),
+                    type: 'modified'
+                }]);
+            });
 
-        watcher.onDidCreate(async uri => {
-            await this.updateContext([{
-                filePath: path.relative(this.workspacePath, uri.fsPath),
-                type: 'created'
-            }]);
-        });
+            watcher.onDidCreate(async uri => {
+                await this.updateContext([{
+                    filePath: path.relative(this.workspacePath, uri.fsPath),
+                    type: 'created'
+                }]);
+            });
 
-        watcher.onDidDelete(async uri => {
-            await this.updateContext([{
-                filePath: path.relative(this.workspacePath, uri.fsPath),
-                type: 'deleted'
-            }]);
-        });
+            watcher.onDidDelete(async uri => {
+                await this.updateContext([{
+                    filePath: path.relative(this.workspacePath, uri.fsPath),
+                    type: 'deleted'
+                }]);
+            });
+        }
 
     } catch (error) {
         console.error('Failed to initialize project context:', error);
@@ -240,5 +265,84 @@ export class ProjectContext {
       });
     });
     return changes;
+  }
+
+  /**
+   * Validates if a file operation maintains project integrity
+   * @param filePath - Relative path to the file
+   * @param operation - Type of operation (create, delete, modify, read)
+   * @returns ValidationResult indicating if the operation is allowed
+   */
+  public async validateStructure(
+    filePath: string, 
+    operation: 'create' | 'delete' | 'modify' | 'read'
+  ): Promise<ValidationResult> {
+    try {
+      const relativePath = path.relative(this.structure.root, filePath);
+      
+      // Prevent path traversal attacks
+      if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+        return {
+          isValid: false,
+          reason: 'Invalid path: Attempted to access outside project directory'
+        };
+      }
+
+      // Check against default restrictions
+      for (const rule of this.defaultRestrictions) {
+        const matcher = new Minimatch(rule.pattern, { matchBase: true, dot: true });
+        if (matcher.match(relativePath)) {
+          if (!rule.isAllowed) {
+            return {
+              isValid: false,
+              reason: rule.description
+            };
+          }
+          break;
+        }
+      }
+
+      // Check if the operation is valid for the current project state
+      const fileExists = this.structure.files.has(relativePath);
+      
+      if (operation === 'create' && fileExists) {
+        return {
+          isValid: false,
+          reason: 'File already exists'
+        };
+      }
+
+      if ((operation === 'delete' || operation === 'modify') && !fileExists) {
+        return {
+          isValid: false,
+          reason: 'File does not exist'
+        };
+      }
+
+      // Store the operation pattern in LocalStore
+      const pattern = `${operation}:${path.extname(filePath) || 'directory'}`;
+      const context = `workspace:${this.workspacePath}`;
+      
+      // Store the pattern for future reference
+      if (this.localStore) {
+        this.localStore.storePattern({
+          pattern,
+          context,
+          timestamp: Date.now(),
+          metadata: {
+            operation,
+            fileType: path.extname(filePath) || 'directory',
+            path: relativePath
+          }
+        });
+      }
+
+      return { isValid: true };
+    } catch (error) {
+      return {
+        isValid: false,
+        reason: `Validation error: ${error.message}`
+      };
+    }
   }
 }
