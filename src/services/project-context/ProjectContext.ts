@@ -2,7 +2,7 @@ import * as path from 'path';
 import { promises as fs } from 'fs';
 import * as vscode from 'vscode';
 import { Minimatch } from 'minimatch';
-import { LocalStore } from '../storage/LocalStore';
+import { LocalStore, OperationPattern } from '../storage/LocalStore';
 
 /**
  * Represents a change in a file within the project
@@ -104,12 +104,12 @@ export class ProjectContext {
                 }]);
             });
 
-            watcher.onDidCreate(async uri => {
-                await this.updateContext([{
-                    filePath: path.relative(this.workspacePath, uri.fsPath),
-                    type: 'created'
-                }]);
-            });
+        watcher.onDidCreate(async uri => {
+            await this.updateContext([{
+                filePath: path.relative(this.workspacePath, uri.fsPath),
+                type: 'created'
+            }]);
+        });
 
             watcher.onDidDelete(async uri => {
                 await this.updateContext([{
@@ -320,21 +320,18 @@ export class ProjectContext {
       }
 
       // Store the operation pattern in LocalStore
-      const pattern = `${operation}:${path.extname(filePath) || 'directory'}`;
-      const context = `workspace:${this.workspacePath}`;
+      const pattern: OperationPattern = {
+        pattern: relativePath,
+        context: 'workspace',
+        timestamp: Date.now(),
+        metadata: { operation }  // Store operation type in metadata
+      };
       
-      // Store the pattern for future reference
-      if (this.localStore) {
-        this.localStore.storePattern({
-          pattern,
-          context,
-          timestamp: Date.now(),
-          metadata: {
-            operation,
-            fileType: path.extname(filePath) || 'directory',
-            path: relativePath
-          }
-        });
+      try {
+        await this.localStore?.storePattern(pattern);
+      } catch (error) {
+        console.warn('Failed to store operation pattern:', error);
+        // Don't fail the validation if storage fails
       }
 
       return { isValid: true };

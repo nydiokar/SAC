@@ -1,10 +1,12 @@
 import { describe, it, beforeEach, afterEach } from 'mocha';
 import { expect } from 'chai';
 import { ProjectContext, FileChange } from '../ProjectContext';
+import { LocalStore, OperationPattern } from '../../storage/LocalStore';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs/promises';
 import proxyquire from 'proxyquire';
+import sinon from 'sinon';
 
 // Mock vscode using proxyquire
 const { ProjectContext: ProjectContextWithMock } = proxyquire('../ProjectContext', {
@@ -27,16 +29,26 @@ const { ProjectContext: ProjectContextWithMock } = proxyquire('../ProjectContext
 describe('ProjectContext', () => {
     let tempDir: string;
     let projectContext: ProjectContext;
+    let mockLocalStore: {
+        storePattern: sinon.SinonStub;
+    };
 
     beforeEach(async () => {
         tempDir = path.join(os.tmpdir(), 'project-context-test-' + Math.random().toString(36).slice(2));
         await fs.mkdir(tempDir, { recursive: true });
-        projectContext = new ProjectContextWithMock(tempDir);
+        
+        // Create mock LocalStore
+        mockLocalStore = {
+            storePattern: sinon.stub().resolves(1)
+        };
+        
+        projectContext = new ProjectContextWithMock(tempDir, mockLocalStore as unknown as LocalStore);
+        await projectContext.initialize();
     });
 
     afterEach(async () => {
-        // Clean up temporary directory
         await fs.rm(tempDir, { recursive: true, force: true });
+        sinon.restore();
     });
 
     it('should initialize with a root directory', () => {
@@ -148,6 +160,62 @@ describe('ProjectContext', () => {
             // Test deleting an existing file
             const deleteResult = await projectContext.validateStructure(testFile, 'delete');
             expect(deleteResult.isValid).to.be.true;
+        });
+    });
+
+    describe('validateStructure with LocalStore', () => {
+        it('should store valid operation patterns', async () => {
+            const result = await projectContext.validateStructure(
+                path.join(tempDir, 'test.ts'),
+                'create'
+            );
+
+            expect(result.isValid).to.be.true;
+            expect(mockLocalStore.storePattern.calledOnce).to.be.true;
+            
+            const storedPattern = mockLocalStore.storePattern.firstCall.args[0] as OperationPattern;
+            expect(storedPattern).to.include({
+                pattern: 'test.ts',
+                context: 'workspace'
+            });
+            expect(storedPattern.metadata).to.deep.equal({ operation: 'create' });
+            expect(storedPattern.timestamp).to.be.a('number');
+        });
+
+        it('should not fail validation if LocalStore fails', async () => {
+            mockLocalStore.storePattern.rejects(new Error('Storage failed'));
+
+            const result = await projectContext.validateStructure(
+                path.join(tempDir, 'test.ts'),
+                'create'
+            );
+
+            expect(result.isValid).to.be.true;
+            expect(mockLocalStore.storePattern.calledOnce).to.be.true;
+        });
+
+        it('should store patterns for different operations', async () => {
+            // Create a test file
+            const testFile = path.join(tempDir, 'test.ts');
+            await fs.writeFile(testFile, 'test content');
+            await projectContext.updateContext([{
+                filePath: 'test.ts',
+                type: 'created',
+                content: 'test content'
+            }]);
+
+            // Test different operations
+            await projectContext.validateStructure(testFile, 'read');
+            expect(mockLocalStore.storePattern.lastCall.args[0].metadata)
+                .to.deep.equal({ operation: 'read' });
+
+            await projectContext.validateStructure(testFile, 'modify');
+            expect(mockLocalStore.storePattern.lastCall.args[0].metadata)
+                .to.deep.equal({ operation: 'modify' });
+
+            await projectContext.validateStructure(testFile, 'delete');
+            expect(mockLocalStore.storePattern.lastCall.args[0].metadata)
+                .to.deep.equal({ operation: 'delete' });
         });
     });
 });
