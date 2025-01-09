@@ -23,6 +23,12 @@ import { openMention } from "../mentions"
 import { getNonce } from "./getNonce"
 import { getUri } from "./getUri"
 import { AutoApprovalSettings, DEFAULT_AUTO_APPROVAL_SETTINGS } from "../../shared/AutoApprovalSettings"
+import { ClineFactory } from "../../factory/ClineFactory"
+import { ApiConfiguration } from "../../shared/api"
+import { ProjectContext } from "../../services/project-context/ProjectContext"
+import { LocalStore } from "../../services/storage/LocalStore"
+import { IVSCodeInterface } from "../../services/vscode/VSCodeInterface"
+import { VSCodeImplementation } from "../../services/vscode/VSCodeImplementation"
 
 /*
 https://github.com/microsoft/vscode-webview-ui-toolkit-samples/blob/main/default/weather-webview/src/providers/WeatherViewProvider.ts
@@ -79,12 +85,29 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 	private workspaceTracker?: WorkspaceTracker
 	mcpHub?: McpHub
 	private latestAnnouncementId = "dec-17-2024" // update to some unique identifier when we add a new announcement
+	private readonly apiConfiguration: ApiConfiguration
+	private readonly autoApprovalSettings: AutoApprovalSettings
+	private readonly projectContext: ProjectContext
+	private readonly localStore: LocalStore
+	private readonly customInstructions?: string
+	private readonly vscodeInterface: IVSCodeInterface
+	private outputChannel: vscode.OutputChannel
 
 	constructor(
 		readonly context: vscode.ExtensionContext,
-		private readonly outputChannel: vscode.OutputChannel,
+		apiConfiguration: ApiConfiguration,
+		autoApprovalSettings: AutoApprovalSettings,
+		projectContext: ProjectContext,
+		localStore: LocalStore,
+		customInstructions?: string
 	) {
-		this.outputChannel.appendLine("ClineProvider instantiated")
+		this.outputChannel = vscode.window.createOutputChannel('Cline');
+		this.apiConfiguration = apiConfiguration
+		this.autoApprovalSettings = autoApprovalSettings
+		this.projectContext = projectContext
+		this.localStore = localStore
+		this.customInstructions = customInstructions
+		this.vscodeInterface = new VSCodeImplementation(vscode, context);
 		ClineProvider.activeInstances.add(this)
 		this.workspaceTracker = new WorkspaceTracker(this)
 		this.mcpHub = new McpHub(this)
@@ -201,7 +224,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 	async initClineWithTask(task?: string, images?: string[]) {
 		await this.clearTask() // ensures that an exising task doesn't exist before starting a new one, although this shouldn't be possible since user must clear task before starting a new one
 		const { apiConfiguration, customInstructions, autoApprovalSettings } = await this.getState()
-		this.cline = new Cline(this, apiConfiguration, autoApprovalSettings, customInstructions, task, images)
+		this.cline = new Cline(this, apiConfiguration, autoApprovalSettings, this.vscodeInterface, this.projectContext, this.localStore, customInstructions, task, images)
 	}
 
 	async initClineWithHistoryItem(historyItem: HistoryItem) {
@@ -211,10 +234,11 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			this,
 			apiConfiguration,
 			autoApprovalSettings,
+			this.vscodeInterface,
+			this.projectContext,
+			this.localStore,
 			customInstructions,
-			undefined,
-			undefined,
-			historyItem,
+			historyItem.id,
 		)
 	}
 
@@ -1085,5 +1109,32 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 		vscode.window.showInformationMessage("State reset")
 		await this.postStateToWebview()
 		await this.postMessageToWebview({ type: "action", action: "chatButtonClicked" })
+	}
+
+	createNewCline(task?: string, images?: string[]): Cline {
+		return ClineFactory.createForProduction(
+			this,
+			this.apiConfiguration,
+			this.autoApprovalSettings,
+			this.projectContext,
+			this.localStore,
+			this.customInstructions,
+			task,
+			images
+		);
+	}
+
+	resumeTask(historyItem: HistoryItem): Cline {
+		return ClineFactory.createForProduction(
+			this,
+			this.apiConfiguration,
+			this.autoApprovalSettings,
+			this.projectContext,
+			this.localStore,
+			this.customInstructions,
+			undefined,
+			undefined,
+			historyItem
+		);
 	}
 }

@@ -14,7 +14,13 @@
 			"*": ["src/*"]
 		}
 	},
-	"include": ["src/**/*.test.ts", "src/**/__tests__/**/*.ts"],
+	"include": [
+		"src/**/*.ts",
+		"src/**/*.test.ts"
+	],
+	"exclude": [
+		"node_modules"
+	],
 	"ts-node": {
 		"files": true,
 		"transpileOnly": true,

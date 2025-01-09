@@ -1,5 +1,8 @@
 import * as path from 'path';
 import { promises as fs } from 'fs';
+import * as vscode from 'vscode';
+import { Minimatch } from 'minimatch';
+import { LocalStore, OperationPattern } from '../storage/LocalStore';
 
 /**
  * Represents a change in a file within the project
@@ -42,17 +45,84 @@ export interface ProjectStructure {
   };
 }
 
+interface ValidationResult {
+  isValid: boolean;
+  reason?: string;
+}
+
+interface ValidationRule {
+  pattern: string;
+  isAllowed: boolean;
+  description: string;
+}
+
 /**
  * Manages project context and analysis
  */
 export class ProjectContext {
   private structure: ProjectStructure;
+  private readonly defaultRestrictions: ValidationRule[] = [
+    { pattern: 'node_modules/**', isAllowed: false, description: 'Restricted system directory' },
+    { pattern: '.env*', isAllowed: false, description: 'Sensitive environment files' },
+    { pattern: '.git/**', isAllowed: false, description: 'Git system directory' },
+    { pattern: '**/*.{ts,js,json,md,txt,yml,yaml}', isAllowed: true, description: 'Common project files' }
+  ];
 
-  constructor(projectRoot: string) {
+  constructor(
+    private workspacePath: string, 
+    private localStore?: LocalStore,
+    private isTestEnvironment: boolean = false
+  ) {
     this.structure = {
-      root: projectRoot,
+      root: workspacePath,
       files: new Map()
     };
+  }
+
+  async initialize(): Promise<void> {
+    try {
+        // Initialize the project structure
+        this.structure = {
+            root: this.workspacePath,
+            files: new Map()
+        };
+
+        // Perform initial project analysis
+        await this.analyze();
+
+        // Only set up file watchers if we're not in test environment
+        if (!this.isTestEnvironment) {
+            const watcher = vscode.workspace.createFileSystemWatcher(
+                new vscode.RelativePattern(this.workspacePath, '**/*')
+            );
+
+            // Handle file changes
+            watcher.onDidChange(async uri => {
+                await this.updateContext([{
+                    filePath: path.relative(this.workspacePath, uri.fsPath),
+                    type: 'modified'
+                }]);
+            });
+
+        watcher.onDidCreate(async uri => {
+            await this.updateContext([{
+                filePath: path.relative(this.workspacePath, uri.fsPath),
+                type: 'created'
+            }]);
+        });
+
+            watcher.onDidDelete(async uri => {
+                await this.updateContext([{
+                    filePath: path.relative(this.workspacePath, uri.fsPath),
+                    type: 'deleted'
+                }]);
+            });
+        }
+
+    } catch (error) {
+        console.error('Failed to initialize project context:', error);
+        throw error;
+    }
   }
 
   /**
@@ -125,6 +195,38 @@ export class ProjectContext {
   }
 
   /**
+   * Gets the current context of the project for pattern matching
+   * Returns a string containing relevant project information
+   */
+  public getCurrentContext(): string {
+    const context: string[] = [];
+    
+    // Add project root
+    context.push(`Project root: ${this.structure.root}`);
+    
+    // Add dependencies if available
+    if (this.structure.dependencies && Object.keys(this.structure.dependencies).length > 0) {
+      context.push('\nDependencies:');
+      Object.entries(this.structure.dependencies)
+        .forEach(([dep, version]) => context.push(`${dep}@${version}`));
+    }
+    
+    // Add file types summary
+    const fileTypes = new Map<string, number>();
+    this.structure.files.forEach((info) => {
+      const type = info.type === 'directory' ? 'directory' : info.type || 'unknown';
+      fileTypes.set(type, (fileTypes.get(type) || 0) + 1);
+    });
+    
+    context.push('\nFile types:');
+    fileTypes.forEach((count, type) => {
+      context.push(`${type}: ${count} files`);
+    });
+    
+    return context.join('\n');
+  }
+
+  /**
    * Recursively scans a directory and updates the file structure
    */
   private async scanDirectory(dirPath: string): Promise<void> {
@@ -147,6 +249,97 @@ export class ProjectContext {
           type: path.extname(entry.name) || 'file'
         });
       }
+    }
+  }
+
+  /**
+   * Gets the list of file changes that occurred during the current session
+   */
+  public getFileChanges(): FileChange[] {
+    const changes: FileChange[] = [];
+    this.structure.files.forEach((info, filePath) => {
+      changes.push({
+        filePath,
+        type: 'read',  // Default to read since we're just getting current state
+        content: undefined  // We don't load content by default
+      });
+    });
+    return changes;
+  }
+
+  /**
+   * Validates if a file operation maintains project integrity
+   * @param filePath - Relative path to the file
+   * @param operation - Type of operation (create, delete, modify, read)
+   * @returns ValidationResult indicating if the operation is allowed
+   */
+  public async validateStructure(
+    filePath: string, 
+    operation: 'create' | 'delete' | 'modify' | 'read'
+  ): Promise<ValidationResult> {
+    try {
+      const relativePath = path.relative(this.structure.root, filePath);
+      
+      // Prevent path traversal attacks
+      if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+        return {
+          isValid: false,
+          reason: 'Invalid path: Attempted to access outside project directory'
+        };
+      }
+
+      // Check against default restrictions
+      for (const rule of this.defaultRestrictions) {
+        const matcher = new Minimatch(rule.pattern, { matchBase: true, dot: true });
+        if (matcher.match(relativePath)) {
+          if (!rule.isAllowed) {
+            return {
+              isValid: false,
+              reason: rule.description
+            };
+          }
+          break;
+        }
+      }
+
+      // Check if the operation is valid for the current project state
+      const fileExists = this.structure.files.has(relativePath);
+      
+      if (operation === 'create' && fileExists) {
+        return {
+          isValid: false,
+          reason: 'File already exists'
+        };
+      }
+
+      if ((operation === 'delete' || operation === 'modify') && !fileExists) {
+        return {
+          isValid: false,
+          reason: 'File does not exist'
+        };
+      }
+
+      // Store the operation pattern in LocalStore
+      const pattern: OperationPattern = {
+        pattern: relativePath,
+        context: 'workspace',
+        timestamp: Date.now(),
+        metadata: { operation }  // Store operation type in metadata
+      };
+      
+      try {
+        await this.localStore?.storePattern(pattern);
+      } catch (error) {
+        console.warn('Failed to store operation pattern:', error);
+        // Don't fail the validation if storage fails
+      }
+
+      return { isValid: true };
+    } catch (error) {
+      return {
+        isValid: false,
+        reason: `Validation error: ${error.message}`
+      };
     }
   }
 }
