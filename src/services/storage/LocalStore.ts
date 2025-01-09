@@ -7,6 +7,7 @@ export interface OperationPattern {
   context: string;
   timestamp: number;
   metadata?: Record<string, any>;
+  confidence?: number;
 }
 
 interface PatternRow {
@@ -15,6 +16,15 @@ interface PatternRow {
   context: string;
   timestamp: number;
   metadata: string | null;
+  confidence: number;
+}
+
+interface ConfidenceUpdateOptions {
+    successIncrease?: number;  // How much to increase on success (default 0.1)
+    failureDecrease?: number;  // How much to decrease on failure (default 0.2)
+    minConfidence?: number;    // Minimum confidence threshold (default 0.0)
+    maxConfidence?: number;    // Maximum confidence threshold (default 1.0)
+    forkThreshold?: number;    // When to fork pattern (default 0.3)
 }
 
 export class LocalStore {
@@ -47,7 +57,8 @@ export class LocalStore {
           context TEXT NOT NULL,
           command TEXT NOT NULL,
           timestamp INTEGER NOT NULL,
-          metadata TEXT
+          metadata TEXT,
+          confidence REAL DEFAULT 0.5
         );
         
         CREATE INDEX IF NOT EXISTS idx_command_context ON patterns(command, context);
@@ -60,21 +71,21 @@ export class LocalStore {
   private prepareStatements() {
     // Prepare statements once for reuse
     this.storeStmt = this.db.prepare(`
-      INSERT INTO patterns (pattern, context, command, timestamp, metadata)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO patterns (pattern, context, command, timestamp, metadata, confidence)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
 
     this.findExactStmt = this.db.prepare(`
       SELECT * FROM patterns 
-      WHERE command = ? AND context = ?
-      ORDER BY timestamp DESC
+      WHERE command = ? AND context LIKE ?
+      ORDER BY confidence DESC, timestamp DESC
       LIMIT 5
     `);
 
     this.findSimilarStmt = this.db.prepare(`
       SELECT * FROM patterns 
       WHERE command = ? 
-      ORDER BY timestamp DESC
+      ORDER BY confidence DESC, timestamp DESC
       LIMIT 10
     `);
   }
@@ -84,12 +95,19 @@ export class LocalStore {
     
     const metadata = pattern.metadata ? JSON.stringify(pattern.metadata) : null;
     
+    // Update the prepared statement to include confidence
+    this.storeStmt = this.db.prepare(`
+        INSERT INTO patterns (pattern, context, command, timestamp, metadata, confidence)
+        VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    
     const result = this.storeStmt.run(
-      pattern.pattern.trim(),
-      pattern.context,
-      command,
-      pattern.timestamp,
-      metadata
+        pattern.pattern.trim(),
+        pattern.context,
+        command,
+        pattern.timestamp,
+        metadata,
+        pattern.confidence ?? 0.5  // Use provided confidence or default to 0.5
     );
 
     return result.lastInsertRowid as number;
@@ -98,27 +116,14 @@ export class LocalStore {
   public findSimilarPattern(pattern: string, context?: string): OperationPattern | null {
     const command = pattern.split(' ')[0].toLowerCase();
     
-    // If context is provided, use LIKE for partial context matching
-    if (context) {
-        const contextMatches = this.db.prepare(`
-            SELECT * FROM patterns 
-            WHERE command = ? AND context LIKE ?
-            ORDER BY timestamp DESC
-            LIMIT 5
-        `).all(command, `%${context}%`) as PatternRow[];
-        
-        if (contextMatches.length > 0) {
-            const bestMatch = this.findBestMatch(pattern, contextMatches);
-            if (bestMatch) return this.convertRowToPattern(bestMatch.row);
-        }
-        return null;
-    }
+    // Use prepared statements for better performance
+    const rows = context 
+        ? this.findExactStmt.all(command, `%${context}%`) as PatternRow[]
+        : this.findSimilarStmt.all(command) as PatternRow[];
 
-    // Use existing findSimilarStmt for non-context searches
-    const similarMatches = this.findSimilarStmt.all(command) as PatternRow[];
-    if (similarMatches.length === 0) return null;
+    if (rows.length === 0) return null;
 
-    const bestMatch = this.findBestMatch(pattern, similarMatches);
+    const bestMatch = this.findBestMatch(pattern, rows);
     if (!bestMatch) return null;
 
     return this.convertRowToPattern(bestMatch.row);
@@ -278,5 +283,71 @@ export class LocalStore {
 
     transaction(patterns);
     return ids;
+  }
+
+  public async updatePatternConfidence(
+    patternId: number, 
+    success: boolean,
+    options: ConfidenceUpdateOptions = {}
+  ): Promise<number> {
+    const {
+        successIncrease = 0.1,
+        failureDecrease = 0.2,
+        minConfidence = 0.0,
+        maxConfidence = 1.0,
+        forkThreshold = 0.3
+    } = options;
+
+    const stmt = this.db.prepare(`
+        UPDATE patterns 
+        SET confidence = CASE
+            WHEN ? = 1 THEN MIN(?, confidence + ?)  -- Success case
+            ELSE MAX(?, confidence - ?)              -- Failure case
+        END
+        WHERE id = ?
+        RETURNING confidence
+    `);
+
+    const result = stmt.get(
+        success ? 1 : 0,
+        maxConfidence,
+        successIncrease,
+        minConfidence,
+        failureDecrease,
+        patternId
+    ) as { confidence: number } | undefined;
+
+    if (!result) {
+        throw new Error(`Pattern with id ${patternId} not found`);
+    }
+
+    // If confidence drops below fork threshold, we might want to fork
+    if (!success && result.confidence <= forkThreshold) {
+        await this.considerPatternFork(patternId);
+    }
+
+    return result.confidence;
+  }
+
+  private async considerPatternFork(patternId: number): Promise<void> {
+    // Get the original pattern
+    const stmt = this.db.prepare(`
+        SELECT * FROM patterns WHERE id = ?
+    `);
+    const pattern = stmt.get(patternId) as PatternRow;
+    
+    if (!pattern) return;
+
+    // Create a new pattern with reset confidence
+    const newPattern = {
+        pattern: pattern.pattern,
+        context: pattern.context,
+        timestamp: Date.now(),
+        metadata: pattern.metadata,
+        confidence: 0.5  // Reset confidence for the fork
+    };
+
+    // Store the fork
+    this.storePattern(newPattern as unknown as Omit<OperationPattern, 'id'>);
   }
 }
