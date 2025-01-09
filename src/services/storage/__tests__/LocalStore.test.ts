@@ -391,5 +391,67 @@ describe('LocalStore', () => {
         expect(maxConfidence).to.equal(1.0);
     });
   });
+
+  describe('Pattern Feedback Loop', () => {
+    it('should track pattern usage history', async () => {
+        const pattern = {
+            pattern: 'create component',
+            context: 'react',
+            timestamp: Date.now()
+        };
+        const id = store.storePattern(pattern);
+
+        await store.recordPatternUsage({
+            patternId: id,
+            timestamp: Date.now(),
+            outcome: 'success',
+            feedback: 'Worked great!'
+        });
+
+        await store.recordPatternUsage({
+            patternId: id,
+            timestamp: Date.now(),
+            outcome: 'partial',
+            adjustments: ['needed styling']
+        });
+
+        const history = store.getPatternHistory(id);
+        expect(history.length).to.equal(2);
+        expect(history[0].outcome).to.equal('partial');
+        expect(history[1].outcome).to.equal('success');
+    });
+
+    it('should calculate success rate', async () => {
+        const pattern = {
+            pattern: 'create test',
+            context: 'test',
+            timestamp: Date.now()
+        };
+        const id = store.storePattern(pattern);
+
+        // Record multiple uses
+        await store.recordPatternUsage({
+            patternId: id,
+            timestamp: Date.now(),
+            outcome: 'success'
+        });
+
+        await store.recordPatternUsage({
+            patternId: id,
+            timestamp: Date.now(),
+            outcome: 'failure'
+        });
+
+        await store.recordPatternUsage({
+            patternId: id,
+            timestamp: Date.now(),
+            outcome: 'success'
+        });
+
+        const successRate = store.getPatternSuccess(id);
+        expect(Math.abs(successRate - 0.67) < 0.01).to.be.true;
+        expect(Math.round(successRate * 100) / 100).to.equal(0.67);
+    });
+  });
 });
 

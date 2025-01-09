@@ -27,6 +27,14 @@ interface ConfidenceUpdateOptions {
     forkThreshold?: number;    // When to fork pattern (default 0.3)
 }
 
+interface PatternUsage {
+    patternId: number;
+    timestamp: number;
+    outcome: 'success' | 'failure' | 'partial';
+    feedback?: string;  // Optional user feedback
+    adjustments?: string[];  // What needed to be adjusted
+}
+
 export class LocalStore {
   private db: DatabaseType;
   private storeStmt!: Statement;
@@ -44,6 +52,7 @@ export class LocalStore {
     this.db.pragma('mmap_size = 30000000000');
     
     this.initialize();
+    this.initializeFeedbackTables();
     this.prepareStatements();
   }
 
@@ -349,5 +358,73 @@ export class LocalStore {
 
     // Store the fork
     this.storePattern(newPattern as unknown as Omit<OperationPattern, 'id'>);
+  }
+
+  private initializeFeedbackTables() {
+    this.db.transaction(() => {
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS pattern_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern_id INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                feedback TEXT,
+                adjustments TEXT,
+                FOREIGN KEY(pattern_id) REFERENCES patterns(id)
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_pattern_usage 
+            ON pattern_usage(pattern_id, outcome);
+        `);
+    })();
+  }
+
+  public async recordPatternUsage(usage: PatternUsage): Promise<void> {
+    // Record the usage
+    const stmt = this.db.prepare(`
+        INSERT INTO pattern_usage (pattern_id, timestamp, outcome, feedback, adjustments)
+        VALUES (?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+        usage.patternId,
+        usage.timestamp,
+        usage.outcome,
+        usage.feedback,
+        usage.adjustments ? JSON.stringify(usage.adjustments) : null
+    );
+
+    // Update pattern confidence based on outcome
+    await this.updatePatternConfidence(
+        usage.patternId, 
+        usage.outcome === 'success',
+        {
+            // Adjust confidence changes based on outcome
+            successIncrease: usage.outcome === 'partial' ? 0.05 : 0.1,
+            failureDecrease: usage.outcome === 'partial' ? 0.1 : 0.2
+        }
+    );
+  }
+
+  public getPatternHistory(patternId: number): PatternUsage[] {
+    const stmt = this.db.prepare(`
+        SELECT * FROM pattern_usage 
+        WHERE pattern_id = ?
+        ORDER BY timestamp DESC
+    `);
+
+    return stmt.all(patternId) as PatternUsage[];
+  }
+
+  public getPatternSuccess(patternId: number): number {
+    const stmt = this.db.prepare(`
+        SELECT 
+            COUNT(CASE WHEN outcome = 'success' THEN 1 END) * 1.0 / COUNT(*) as success_rate
+        FROM pattern_usage 
+        WHERE pattern_id = ?
+    `);
+
+    const result = stmt.get(patternId) as { success_rate: number };
+    return result?.success_rate ?? 0;
   }
 }
