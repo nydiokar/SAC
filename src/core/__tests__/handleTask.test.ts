@@ -162,7 +162,11 @@ describe('Task Pattern Matching and Execution', function() {
         });
 
         it('should use API and learn from execution when no pattern exists', async function() {
-            const executeWithAPIStub = sandbox.stub(cline as any, 'executeWithAPI').resolves();
+            const executeWithAPIStub = sandbox.stub(cline as any, 'executeWithAPI').resolves({
+                status: 'success',
+                fileChanges: [],
+                userFeedback: 'test'
+            });
             const learnFromExecutionStub = sandbox.stub(cline as any, 'learnFromExecution').resolves();
             
             await cline.handleTask('unique new task');
@@ -173,21 +177,32 @@ describe('Task Pattern Matching and Execution', function() {
 
         it('should learn from execution and store new patterns', async function() {
             const task = 'brand new task';
-            const context = 'test context';
             
-            // Don't re-stub getCurrentContext since it's already stubbed in beforeEach
+            // Create spy for storePattern
             const storePatternSpy = sandbox.spy(localStore, 'storePattern');
             
+            // Call learnFromExecution with proper execution result
             await cline['learnFromExecution'](task, {
                 status: 'success',
                 fileChanges: [],
                 userFeedback: 'Great job!'
             });
 
-            expect(storePatternSpy.calledOnce).to.be.true;
-            const storedPattern = storePatternSpy.firstCall.args[0];
-            expect(storedPattern.pattern).to.equal(task);
-            expect(storedPattern.context).to.equal(context);
+            // Since we provided userFeedback, storePattern should be called twice
+            expect(storePatternSpy.calledTwice, 'storePattern should be called twice - once for execution and once for feedback').to.be.true;
+            
+            if (storePatternSpy.calledTwice) {
+                // Check first call (execution pattern)
+                const executionPattern = storePatternSpy.firstCall.args[0];
+                expect(executionPattern.pattern).to.equal(task);
+                expect(executionPattern.metadata?.status).to.equal('success');
+                
+                // Check second call (feedback pattern)
+                const feedbackPattern = storePatternSpy.secondCall.args[0];
+                expect(feedbackPattern.pattern).to.equal(task);
+                expect(feedbackPattern.metadata?.type).to.equal('feedback');
+                expect(feedbackPattern.metadata?.feedback).to.equal('Great job!');
+            }
         });
     });
 });
