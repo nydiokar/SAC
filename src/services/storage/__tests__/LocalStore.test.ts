@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import should from 'should';
+import { expect } from 'chai';
 
 describe('LocalStore', () => {
   let store: LocalStore;
@@ -351,4 +352,44 @@ describe('LocalStore', () => {
         should(avgSearchTime).be.below(10); // Average search time under 10ms
     });
   });
+
+  describe('Pattern Confidence', () => {
+    it('should increase confidence on success', async () => {
+        const pattern = {
+            pattern: 'test pattern',
+            context: 'test',
+            timestamp: Date.now()
+        };
+        const id = store.storePattern(pattern);
+        
+        const newConfidence = await store.updatePatternConfidence(id, true);
+        expect(newConfidence).to.equal(0.6); // 0.5 + 0.1
+    });
+
+    it('should decrease confidence on failure', async () => {
+        const pattern = {
+            pattern: 'test pattern',
+            context: 'test',
+            timestamp: Date.now()
+        };
+        const id = store.storePattern(pattern);
+        
+        const newConfidence = await store.updatePatternConfidence(id, false);
+        expect(newConfidence).to.equal(0.3); // 0.5 - 0.2
+    });
+
+    it('should respect confidence bounds', async () => {
+        const pattern = {
+            pattern: 'test pattern',
+            context: 'test',
+            timestamp: Date.now(),
+            confidence: 0.95
+        };
+        const id = store.storePattern(pattern);
+        
+        const maxConfidence = await store.updatePatternConfidence(id, true);
+        expect(maxConfidence).to.equal(1.0);
+    });
+  });
 });
+
