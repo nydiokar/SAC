@@ -4,21 +4,31 @@ import sinon from 'sinon'
 import { expect } from 'chai' 
 
 describe('HistoryItem', () => {
-    const mockCrypto = {
-        randomUUID: () => '123e4567-e89b-12d3-a456-426614174000'
-    }
-    global.crypto = mockCrypto as any
-    
-    let clock: any
+    let originalCrypto: any;
     
     beforeEach(() => {
-        const fixedDate = new Date('2024-01-01')
-        clock = sinon.useFakeTimers(fixedDate.getTime())
-    })
+        // Store original crypto
+        originalCrypto = global.crypto;
+        // Set mock crypto
+        Object.defineProperty(global, 'crypto', {
+            value: {
+                randomUUID: () => '123e4567-e89b-12d3-a456-426614174000'
+            },
+            configurable: true
+        });
+        
+        const fixedDate = new Date('2024-01-01');
+        sinon.useFakeTimers(fixedDate.getTime());
+    });
 
     afterEach(() => {
-        clock.restore()
-    })
+        sinon.restore();
+        // Restore original crypto
+        Object.defineProperty(global, 'crypto', {
+            value: originalCrypto,
+            configurable: true
+        });
+    });
 
     describe('createHistoryItem', () => {
         it('creates a basic history item with required fields', () => {

@@ -1,4 +1,4 @@
-import '../../../utils/path';
+import '../../utils/path';
 import path from 'path';
 
 import type { SecretStorageChangeEvent } from 'vscode';
