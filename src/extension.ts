@@ -7,6 +7,8 @@ import { ApiConfiguration } from './shared/api';
 import { AutoApprovalSettings } from './shared/AutoApprovalSettings';
 import { EDITOR_SCHEME } from './integrations/editor/constants';
 import { createClineAPI } from './exports/index';
+import { PatternService } from './services/patterns/PatternService';
+import { LogPatternExtractor } from './services/patterns/LogPatternExtractor_old';
 
 
 
@@ -139,6 +141,16 @@ export async function activate(context: vscode.ExtensionContext) {
 		}
 	}
 	context.subscriptions.push(vscode.window.registerUriHandler({ handleUri }))
+
+	const patternService = new PatternService(
+		localStore,
+		new LogPatternExtractor(localStore, projectContext)
+	);
+
+	// Process any pending tasks on startup
+	patternService.processPendingTasks(
+		context.globalStorageUri.fsPath
+	).catch(console.error);
 
 	return createClineAPI(outputChannel, sidebarProvider)
 }

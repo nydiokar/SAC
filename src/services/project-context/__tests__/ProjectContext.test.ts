@@ -243,7 +243,7 @@ describe('ProjectContext', () => {
             // Verify pattern consistency
             patterns.forEach(pattern => {
                 expect(pattern.context).to.equal('workspace');
-                expect(pattern.metadata?.operation).to.equal('created');
+                expect(pattern.metadata?.taskType).to.equal('component');
             });
         });
 

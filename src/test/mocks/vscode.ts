@@ -41,6 +41,12 @@ export const workspace = {
     workspaceFolders: [{
         uri: { fsPath: path.normalize('/test/workspace') }
     }],
+    createFileSystemWatcher: (pattern: string | RelativePattern) => ({
+        onDidChange: (listener: any) => ({ dispose: () => {} }),
+        onDidCreate: (listener: any) => ({ dispose: () => {} }),
+        onDidDelete: (listener: any) => ({ dispose: () => {} }),
+        dispose: () => {}
+    }),
     ...createVSCodeProxy()
 };
 
@@ -131,6 +137,10 @@ export class EventEmitter<T> {
     }
 }
 
+export class RelativePattern {
+  constructor(public base: string, public pattern: string) {}
+}
+
 export const vscode = {
   workspace: {
     createFileSystemWatcher: () => ({
@@ -140,9 +150,7 @@ export const vscode = {
       dispose: () => {}
     })
   },
-  RelativePattern: class {
-    constructor(public base: string, public pattern: string) {}
-  }
+  RelativePattern
 };
 
 export default vscode;

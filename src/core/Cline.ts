@@ -55,6 +55,8 @@ import { showSystemNotification } from "../integrations/notifications"
 import { removeInvalidChars } from "../utils/string"
 import { fixModelHtmlEscaping } from "../utils/string"
 import { IVSCodeInterface } from "../services/vscode/VSCodeInterface"
+import { PatternService } from "../services/patterns/PatternService"
+import { LogPatternExtractor } from "../services/patterns/LogPatternExtractor"
 
 const cwd =
 	vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath).at(0) ?? path.join(os.homedir(), "Desktop") // may or may not exist but fs checking existence would immediately ask for permission which would be bad UX, need to come up with a better solution
@@ -96,6 +98,7 @@ export class Cline {
 	private projectContext: ProjectContext
 	private localStore: LocalStore
 	private vscodeInterface: IVSCodeInterface
+	private patternService: PatternService
 
 	constructor(
 		provider: ClineProvider,
@@ -116,6 +119,11 @@ export class Cline {
 		this.projectContext = projectContext;
 		this.localStore = localStore;
 		this.customInstructions = customInstructions;
+
+		this.patternService = new PatternService(
+			localStore,
+			new LogPatternExtractor(localStore, this.projectContext)
+		);
 
 		// Initialize required services
 		this.initializeServices()
@@ -154,60 +162,40 @@ export class Cline {
 	 * @param task The original task description
 	 * @param result The execution result containing status and context
 	 */
-	private async learnFromExecution(task: string, result: {
-		status: 'success' | 'error';
-		fileChanges?: FileChange[];
-		error?: string;
-		userFeedback?: string;
-	}): Promise<void> {
+	private async learnFromExecution(task: string, result: ExecutionResult): Promise<void> {
 		try {
 			// Build context information
 			const contextParts: string[] = [];
 			
-			// Add execution status and basic info
-			contextParts.push(`Status: ${result.status}`);
-
-			// Add file changes if present
-			if (result.fileChanges && result.fileChanges.length > 0) {
-				contextParts.push('\nFile Changes:');
-				result.fileChanges.forEach(change => {
-					contextParts.push(`- ${change.type}: ${change.filePath}`);
-				});
-			}
-
-			// Add error information if present
-			if (result.error) {
-				contextParts.push(`\nError Details: ${result.error}`);
-			}
-
-			// Get project context
-			const projectContext = this.projectContext.getCurrentContext();
-			if (projectContext) {
-				contextParts.push('\nProject Context:', projectContext);
-			}
-
-			// Store as operation pattern for future matching
-			await this.localStore.storePattern({
+			// Create a single pattern with all information
+			const pattern: OperationPattern = {
 				pattern: task,
 				context: contextParts.join('\n'),
 				timestamp: Date.now(),
+				confidence: 1.0, // Initial confidence score for new patterns
 				metadata: {
-					status: result.status,
-					hasFileChanges: result.fileChanges && result.fileChanges.length > 0,
-					hasError: !!result.error
+					toolUsage: [], // Required empty array since we don't track tool usage yet
+					taskType: result.status, // Store status as taskType
+					filePath: result.fileChanges?.[0]?.filePath, // Store first file path if available
+					changes: result.fileChanges?.[0] ? {
+						from: '',  // We don't track original content currently
+						to: result.fileChanges[0].content || ''
+					} : undefined
 				}
-			});
+			};
 
-			// If user feedback is provided, update the pattern
+			// Store pattern and wait for completion
+			const patternId = await this.localStore.storePattern(pattern);
+
+			// If we have feedback, update usage
 			if (result.userFeedback) {
-				await this.localStore.storePattern({
-					pattern: task,
-					context: `User Feedback: ${result.userFeedback}`,
+				await this.localStore.recordPatternUsage({
+					patternId,
 					timestamp: Date.now(),
-					metadata: {
-						type: 'feedback',
-						feedback: result.userFeedback
-					}
+					outcome: result.status === 'success' ? 'success' : 
+							result.status === 'error' ? 'failure' : 'partial',
+					feedback: result.userFeedback,
+					adjustments: result.fileChanges?.map(c => `${c.type}:${c.filePath}`)
 				});
 			}
 
@@ -366,7 +354,16 @@ export class Cline {
 		try {
 			const filePath = path.join(await this.ensureTaskDirectoryExists(), GlobalFileNames.uiMessages)
 			await fs.writeFile(filePath, JSON.stringify(this.clineMessages))
-			// combined as they are in ChatView
+			
+			// Process patterns after task completion
+			if (this.isTaskComplete()) {
+				await this.patternService.processTaskLogs(
+					this.taskId,
+					this.vscodeInterface.context.globalStorageUri.fsPath
+				);
+			}
+
+			// Update task history
 			const apiMetrics = getApiMetrics(combineApiRequests(combineCommandSequences(this.clineMessages.slice(1))))
 			const taskMessage = this.clineMessages[0] // first message is always the task say
 			const lastRelevantMessage =
@@ -389,6 +386,15 @@ export class Cline {
 		} catch (error) {
 			console.error("Failed to save cline messages:", error)
 		}
+	}
+
+	private isTaskComplete(): boolean {
+		return this.didCompleteReadingStream && 
+			   !this.abort &&
+			   this.clineMessages.some(m => 
+				   (m.type === 'say' && m.say === "api_req_finished") || 
+				   (m.type === 'ask' && m.text === "attempt_completion")
+			   );
 	}
 
 	// Communicate with webview
@@ -1396,8 +1402,9 @@ export class Cline {
 									pushToolResult(await this.sayAndCreateMissingParamError("write_to_file", "content"))
 									await this.diffViewProvider.reset()
 									break
-								}
 								this.consecutiveMistakeCount = 0
+								}
+								
 
 								// if isEditingFile false, that means we have the full contents of the file already.
 								// it's important to note how this function works, you can't make the assumption that the block.partial conditional will always be called since it may immediately get complete, non-partial data. So this part of the logic will always be called.
@@ -2920,4 +2927,5 @@ export class Cline {
 
 		return `<environment_details>\n${details.trim()}\n</environment_details>`
 	}
+
 }

@@ -1,6 +1,6 @@
 import * as path from 'path';
 import { promises as fs } from 'fs';
-import * as vscode from 'vscode';
+import { workspace, RelativePattern } from 'vscode';
 import { Minimatch } from 'minimatch';
 import { LocalStore, OperationPattern } from '../storage/LocalStore';
 
@@ -67,6 +67,7 @@ export class ProjectContext {
     { pattern: '.git/**', isAllowed: false, description: 'Git system directory' },
     { pattern: '**/*.{ts,js,json,md,txt,yml,yaml}', isAllowed: true, description: 'Common project files' }
   ];
+  private fileChangesHistory: FileChange[] = [];
 
   constructor(
     private workspacePath: string, 
@@ -92,8 +93,8 @@ export class ProjectContext {
 
         // Only set up file watchers if we're not in test environment
         if (!this.isTestEnvironment) {
-            const watcher = vscode.workspace.createFileSystemWatcher(
-                new vscode.RelativePattern(this.workspacePath, '**/*')
+            const watcher = workspace.createFileSystemWatcher(
+                new RelativePattern(this.workspacePath, '**/*')
             );
 
             // Handle file changes
@@ -153,6 +154,9 @@ export class ProjectContext {
    * Updates project context based on file changes
    */
   public async updateContext(changes: FileChange[]): Promise<void> {
+    // Store changes in history
+    this.fileChangesHistory.push(...changes);
+    
     for (const change of changes) {
       const absolutePath = path.join(this.structure.root, change.filePath);
       
@@ -256,15 +260,7 @@ export class ProjectContext {
    * Gets the list of file changes that occurred during the current session
    */
   public getFileChanges(): FileChange[] {
-    const changes: FileChange[] = [];
-    this.structure.files.forEach((info, filePath) => {
-      changes.push({
-        filePath,
-        type: 'read',  // Default to read since we're just getting current state
-        content: undefined  // We don't load content by default
-      });
-    });
-    return changes;
+    return [...this.fileChangesHistory]; // Return copy of changes
   }
 
   /**
@@ -324,7 +320,11 @@ export class ProjectContext {
         pattern: relativePath,
         context: 'workspace',
         timestamp: Date.now(),
-        metadata: { operation }  // Store operation type in metadata
+        metadata: {
+            taskType: operation,
+            toolUsage: []
+        },
+        confidence: 1.0
       };
       
       try {
@@ -341,5 +341,9 @@ export class ProjectContext {
         reason: `Validation error: ${error.message}`
       };
     }
+  }
+
+  public clearFileChanges(): void {
+    this.fileChangesHistory = [];
   }
 }

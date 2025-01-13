@@ -1,23 +1,12 @@
 import Database from 'better-sqlite3';
-import type { Database as DatabaseType, Statement } from 'better-sqlite3';
+import type { Database as DatabaseType } from 'better-sqlite3';
+import { PatternStorage } from './PatternStorage';
+import { LearningStorage } from './LearningStorage';
+import { PatternCategory, PatternRow } from './types';
+import { ExecutionOutcome } from './types';
+import { LearningPattern, OperationPattern } from '../patterns/BasePattern';
 
-export interface OperationPattern {
-  id?: number;
-  pattern: string;
-  context: string;
-  timestamp: number;
-  metadata?: Record<string, any>;
-  confidence?: number;
-}
-
-interface PatternRow {
-  id: number;
-  pattern: string;
-  context: string;
-  timestamp: number;
-  metadata: string | null;
-  confidence: number;
-}
+export type { OperationPattern };
 
 interface ConfidenceUpdateOptions {
     successIncrease?: number;  // How much to increase on success (default 0.1)
@@ -36,395 +25,227 @@ interface PatternUsage {
 }
 
 export class LocalStore {
-  private db: DatabaseType;
-  private storeStmt!: Statement;
-  private findExactStmt!: Statement;
-  private findSimilarStmt!: Statement;
+    private db: DatabaseType;
+    private patternStorage: PatternStorage;
+    private learningStorage: LearningStorage;
 
-  constructor(dbPath: string) {
-    this.db = new Database(dbPath);
-    
-    // Additional performance optimizations
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('synchronous = NORMAL');
-    this.db.pragma('cache_size = 2000');  // Increased cache size
-    this.db.pragma('temp_store = MEMORY');
-    this.db.pragma('mmap_size = 30000000000');
-    
-    this.initialize();
-    this.initializeFeedbackTables();
-    this.prepareStatements();
-  }
+    constructor(dbPath: string) {
+        this.db = new Database(dbPath);
+        this.patternStorage = new PatternStorage(this.db);
+        this.learningStorage = new LearningStorage(this.db, this.patternStorage);
+        this.initializeTables();
+    }
 
-  private initialize() {
-    // Wrap table creation in transaction for better performance
-    this.db.transaction(() => {
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS patterns (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          pattern TEXT NOT NULL,
-          context TEXT NOT NULL,
-          command TEXT NOT NULL,
-          timestamp INTEGER NOT NULL,
-          metadata TEXT,
-          confidence REAL DEFAULT 0.5
-        );
-        
-        CREATE INDEX IF NOT EXISTS idx_command_context ON patterns(command, context);
-        CREATE INDEX IF NOT EXISTS idx_context_timestamp ON patterns(context, timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_command_timestamp ON patterns(command, timestamp DESC);
-      `);
-    })();
-  }
-
-  private prepareStatements() {
-    // Prepare statements once for reuse
-    this.storeStmt = this.db.prepare(`
-      INSERT INTO patterns (pattern, context, command, timestamp, metadata, confidence)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
-
-    this.findExactStmt = this.db.prepare(`
-      SELECT * FROM patterns 
-      WHERE command = ? AND context LIKE ?
-      ORDER BY confidence DESC, timestamp DESC
-      LIMIT 5
-    `);
-
-    this.findSimilarStmt = this.db.prepare(`
-      SELECT * FROM patterns 
-      WHERE command = ? 
-      ORDER BY confidence DESC, timestamp DESC
-      LIMIT 10
-    `);
-  }
-
-  public storePattern(pattern: Omit<OperationPattern, 'id'>): number {
-    const command = pattern.pattern.split(' ')[0].toLowerCase();
-    
-    const metadata = pattern.metadata ? JSON.stringify(pattern.metadata) : null;
-    
-    // Update the prepared statement to include confidence
-    this.storeStmt = this.db.prepare(`
-        INSERT INTO patterns (pattern, context, command, timestamp, metadata, confidence)
-        VALUES (?, ?, ?, ?, ?, ?)
-    `);
-    
-    const result = this.storeStmt.run(
-        pattern.pattern.trim(),
-        pattern.context,
-        command,
-        pattern.timestamp,
-        metadata,
-        pattern.confidence ?? 0.5  // Use provided confidence or default to 0.5
-    );
-
-    return result.lastInsertRowid as number;
-  }
-
-  public findSimilarPattern(pattern: string, context?: string): OperationPattern | null {
-    const command = pattern.split(' ')[0].toLowerCase();
-    
-    // Use prepared statements for better performance
-    const rows = context 
-        ? this.findExactStmt.all(command, `%${context}%`) as PatternRow[]
-        : this.findSimilarStmt.all(command) as PatternRow[];
-
-    if (rows.length === 0) return null;
-
-    const bestMatch = this.findBestMatch(pattern, rows);
-    if (!bestMatch) return null;
-
-    return this.convertRowToPattern(bestMatch.row);
-  }
-
-  private findBestMatch(pattern: string, rows: PatternRow[]) {
-    if (rows.length === 0) return null;
-
-    // For security/auth and styling patterns, check metadata
-    for (const row of rows) {
-        try {
-            const metadata = JSON.parse(row.metadata || '{}');
-            const metadataScore = this.calculateMetadataSimilarity(pattern, metadata);
-            
-            // If we have a strong metadata match, return it immediately
-            if (metadataScore > 0.5) {
-                return { row, score: metadataScore };
-            }
-        } catch {
-            continue;
+    async close(): Promise<void> {
+        if (this.db) {
+            this.db.close();
         }
     }
 
-    // Fall back to regular similarity matching
-    const similarity = this.calculatePatternSimilarity(pattern, rows[0].pattern);
-    return similarity >= 0.3 ? { row: rows[0], score: similarity } : null;
-  }
-  
-  private convertRowToPattern(row: PatternRow): OperationPattern {
-    let metadata: Record<string, any> | undefined;
-    
-    try {
-        // More robust metadata parsing
-        metadata = row.metadata ? JSON.parse(row.metadata) : undefined;
-        
-        // Ensure metadata is an object
-        if (metadata && typeof metadata !== 'object') {
-            metadata = { value: metadata };
-        }
-    } catch (e) {
-        console.warn('Failed to parse metadata:', e);
-        metadata = undefined;
-    }
-
-    return {
-        id: row.id,
-        pattern: row.pattern,
-        context: row.context,
-        timestamp: row.timestamp,
-        metadata
-    };
-  }
-
-  private calculatePatternSimilarity(pattern1: string, pattern2: string): number {
-    const words1 = pattern1.toLowerCase().split(/\s+/);
-    const words2 = pattern2.toLowerCase().split(/\s+/);
-    
-    let score = 0;
-    const maxScore = Math.max(words1.length, words2.length);
-    
-    // Match exact words in any position
-    words1.forEach(word => {
-        if (words2.includes(word)) {
-            score += 1;
-        }
-    });
-
-    // Bonus for matching first word (command)
-    if (words1[0] === words2[0]) {
-        score += 0.5;
-    }
-
-    // Bonus for matching length
-    if (words1.length === words2.length) {
-        score += 0.5;
-    }
-
-    return score / maxScore;
-  }
-
-  private calculateMetadataSimilarity(pattern: string, metadata: Record<string, any>): number {
-    let score = 0;
-    const patternLower = pattern.toLowerCase();
-
-    // Check each metadata value for matches
-    for (const [key, value] of Object.entries(metadata)) {
-        const valueStr = String(value).toLowerCase();
-        
-        // Direct matches in pattern
-        if (patternLower.includes(valueStr)) {
-            score += 0.4;  // Increased score for direct matches
-        }
-
-        // Partial matches
-        if (patternLower.includes(key.toLowerCase())) {
-            score += 0.2;
-        }
-
-        // Special handling for styling-related terms
-        if (key === 'styling' && 
-            (patternLower.includes('style') || 
-             patternLower.includes('styled') ||
-             patternLower.includes('css'))) {
-            score += 0.6;  // Increased score for styling matches
-        }
-
-        // Special handling for security-related terms
-        if (key === 'security' && 
-            (patternLower.includes('secure') || 
-             patternLower.includes('auth') ||
-             patternLower.includes('authentication'))) {
-            score += 0.6;  // Increased score for security matches
-        }
-    }
-
-    return Math.min(score, 1);  // Normalize score to max of 1
-  }
-
-  public findAllPatterns(pattern: string): OperationPattern[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM patterns 
-      WHERE pattern LIKE ?
-      ORDER BY timestamp DESC
-    `);
-
-    const rows = stmt.all(`%${pattern.trim()}%`) as PatternRow[];
-    return rows.map(row => ({
-      id: row.id,
-      pattern: row.pattern,
-      context: row.context,
-      timestamp: row.timestamp,
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined
-    }));
-  }
-
-  public close() {
-    this.db.close();
-  }
-
-  // Add method for bulk operations
-  public bulkStore(patterns: Omit<OperationPattern, 'id'>[]): number[] {
-    const ids: number[] = [];
-    
-    const transaction = this.db.transaction((patterns: Omit<OperationPattern, 'id'>[]) => {
-      for (const pattern of patterns) {
-        const command = pattern.pattern.split(' ')[0].toLowerCase();
-        const result = this.storeStmt.run(
-          pattern.pattern.trim(),
-          pattern.context,
-          command,
-          pattern.timestamp,
-          pattern.metadata ? JSON.stringify(pattern.metadata) : null
-        );
-        ids.push(result.lastInsertRowid as number);
-      }
-    });
-
-    transaction(patterns);
-    return ids;
-  }
-
-  public async updatePatternConfidence(
-    patternId: number, 
-    success: boolean,
-    options: ConfidenceUpdateOptions = {}
-  ): Promise<number> {
-    const {
-        successIncrease = 0.1,
-        failureDecrease = 0.2,
-        minConfidence = 0.0,
-        maxConfidence = 1.0,
-        forkThreshold = 0.3
-    } = options;
-
-    const stmt = this.db.prepare(`
-        UPDATE patterns 
-        SET confidence = CASE
-            WHEN ? = 1 THEN MIN(?, confidence + ?)  -- Success case
-            ELSE MAX(?, confidence - ?)              -- Failure case
-        END
-        WHERE id = ?
-        RETURNING confidence
-    `);
-
-    const result = stmt.get(
-        success ? 1 : 0,
-        maxConfidence,
-        successIncrease,
-        minConfidence,
-        failureDecrease,
-        patternId
-    ) as { confidence: number } | undefined;
-
-    if (!result) {
-        throw new Error(`Pattern with id ${patternId} not found`);
-    }
-
-    // If confidence drops below fork threshold, we might want to fork
-    if (!success && result.confidence <= forkThreshold) {
-        await this.considerPatternFork(patternId);
-    }
-
-    return result.confidence;
-  }
-
-  private async considerPatternFork(patternId: number): Promise<void> {
-    // Get the original pattern
-    const stmt = this.db.prepare(`
-        SELECT * FROM patterns WHERE id = ?
-    `);
-    const pattern = stmt.get(patternId) as PatternRow;
-    
-    if (!pattern) return;
-
-    // Create a new pattern with reset confidence
-    const newPattern = {
-        pattern: pattern.pattern,
-        context: pattern.context,
-        timestamp: Date.now(),
-        metadata: pattern.metadata,
-        confidence: 0.5  // Reset confidence for the fork
-    };
-
-    // Store the fork
-    this.storePattern(newPattern as unknown as Omit<OperationPattern, 'id'>);
-  }
-
-  private initializeFeedbackTables() {
-    this.db.transaction(() => {
+    private initializeTables(): void {
         this.db.exec(`
+            CREATE TABLE IF NOT EXISTS patterns (
+                id INTEGER PRIMARY KEY,
+                pattern TEXT NOT NULL,
+                context TEXT,
+                timestamp INTEGER,
+                metadata TEXT,
+                confidence REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS learning_patterns (
+                id INTEGER PRIMARY KEY,
+                pattern_id INTEGER,
+                project_fingerprint TEXT,
+                execution_data TEXT,
+                category TEXT,
+                FOREIGN KEY(pattern_id) REFERENCES patterns(id)
+            );
+
             CREATE TABLE IF NOT EXISTS pattern_usage (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                pattern_id INTEGER NOT NULL,
-                timestamp INTEGER NOT NULL,
-                outcome TEXT NOT NULL,
+                id INTEGER PRIMARY KEY,
+                pattern_id INTEGER,
+                timestamp INTEGER,
+                outcome TEXT,
                 feedback TEXT,
                 adjustments TEXT,
                 FOREIGN KEY(pattern_id) REFERENCES patterns(id)
             );
-            
-            CREATE INDEX IF NOT EXISTS idx_pattern_usage 
-            ON pattern_usage(pattern_id, outcome);
+
+            CREATE TABLE IF NOT EXISTS pattern_evolution (
+                id INTEGER PRIMARY KEY,
+                original_pattern_id INTEGER,
+                changes TEXT,
+                outcome TEXT,
+                timestamp INTEGER,
+                FOREIGN KEY(original_pattern_id) REFERENCES patterns(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS pattern_validation (
+                id INTEGER PRIMARY KEY,
+                pattern_id INTEGER,
+                success INTEGER,
+                context TEXT,
+                timestamp INTEGER,
+                metadata TEXT,
+                FOREIGN KEY(pattern_id) REFERENCES patterns(id)
+            );
         `);
-    })();
-  }
+    }
 
-  public async recordPatternUsage(usage: PatternUsage): Promise<void> {
-    // Record the usage
-    const stmt = this.db.prepare(`
-        INSERT INTO pattern_usage (pattern_id, timestamp, outcome, feedback, adjustments)
-        VALUES (?, ?, ?, ?, ?)
-    `);
+    // Core pattern operations
+    async storePattern(pattern: OperationPattern): Promise<number> {
+        return this.patternStorage.store(pattern);
+    }
 
-    stmt.run(
-        usage.patternId,
-        usage.timestamp,
-        usage.outcome,
-        usage.feedback,
-        usage.adjustments ? JSON.stringify(usage.adjustments) : null
-    );
+    async updatePatternConfidence(
+        patternId: number, 
+        success: boolean, 
+        options?: ConfidenceUpdateOptions
+    ): Promise<number> {
+        return this.patternStorage.updateConfidence(patternId, success, options);
+    }
 
-    // Update pattern confidence based on outcome
-    await this.updatePatternConfidence(
-        usage.patternId, 
-        usage.outcome === 'success',
-        {
-            // Adjust confidence changes based on outcome
-            successIncrease: usage.outcome === 'partial' ? 0.05 : 0.1,
-            failureDecrease: usage.outcome === 'partial' ? 0.1 : 0.2
+    async recordPatternUsage(usage: PatternUsage): Promise<void> {
+        return this.patternStorage.recordUsage(usage);
+    }
+
+    // Learning pattern operations
+    async storeLearningPattern(pattern: LearningPattern): Promise<number> {
+        return this.learningStorage.store(pattern);
+    }
+
+    // Pattern finding operations
+    async findSimilarPattern(pattern: string, context?: string): Promise<OperationPattern | null> {
+        const patterns = await this.patternStorage.find(pattern);
+        if (!patterns.length) return null;
+        
+        if (context) {
+            return this.findBestMatchForContext(patterns, context);
         }
-    );
-  }
+        
+        return patterns[0];
+    }
 
-  public getPatternHistory(patternId: number): PatternUsage[] {
-    const stmt = this.db.prepare(`
-        SELECT * FROM pattern_usage 
-        WHERE pattern_id = ?
-        ORDER BY timestamp DESC
-    `);
+    async findAllSimilarPatterns(pattern: string, context?: string): Promise<OperationPattern[]> {
+        const patterns = await this.patternStorage.find(pattern);
+        if (context) {
+            return this.findMatchesForContext(patterns, context);
+        }
+        return patterns;
+    }
 
-    return stmt.all(patternId) as PatternUsage[];
-  }
+    async findAllPatterns(pattern: string): Promise<OperationPattern[]> {
+        return this.patternStorage.find(pattern);
+    }
 
-  public getPatternSuccess(patternId: number): number {
-    const stmt = this.db.prepare(`
-        SELECT 
-            COUNT(CASE WHEN outcome = 'success' THEN 1 END) * 1.0 / COUNT(*) as success_rate
-        FROM pattern_usage 
-        WHERE pattern_id = ?
-    `);
+    async findPatternsByFingerprint(fingerprint?: string): Promise<OperationPattern[]> {
+        if (!fingerprint) return [];
+        const stmt = this.db.prepare(`
+            SELECT p.* FROM patterns p
+            JOIN learning_patterns lp ON p.id = lp.pattern_id
+            WHERE lp.project_fingerprint = ?
+        `);
+        const rows = stmt.all(fingerprint) as PatternRow[];
+        return rows.map(row => ({
+            id: row.id,
+            pattern: row.pattern,
+            context: row.context,
+            timestamp: row.timestamp,
+            metadata: row.metadata ? JSON.parse(row.metadata) : {},
+            confidence: row.confidence
+        }));
+    }
 
-    const result = stmt.get(patternId) as { success_rate: number };
-    return result?.success_rate ?? 0;
-  }
+    async updatePatternValidation(
+        patternId: number,
+        validation: {
+            success: 'success' | 'failure' | 'partial';
+            projectContext: string;
+            timestamp: number;
+            adjustments: string[];
+        }
+    ): Promise<void> {
+        const stmt = this.db.prepare(`
+            INSERT INTO pattern_validation (
+                pattern_id,
+                success,
+                context,
+                timestamp,
+                metadata
+            ) VALUES (?, ?, ?, ?, ?)
+        `);
+        stmt.run(
+            patternId,
+            validation.success === 'success' ? 1 : 0,
+            validation.projectContext,
+            validation.timestamp,
+            JSON.stringify({ adjustments: validation.adjustments })
+        );
+    }
+
+    private findBestMatchForContext(
+        patterns: OperationPattern[], 
+        context: string
+    ): OperationPattern | null {
+        // First try exact context match
+        const exactMatch = patterns.find(p => p.context === context);
+        if (exactMatch) return exactMatch;
+
+        // Then try partial context match
+        const partialMatch = patterns.find(p => 
+            p.context && (
+                p.context.includes(context) || 
+                context.includes(p.context)
+            )
+        );
+        if (partialMatch) return partialMatch;
+
+        // If no context matches, return null
+        return null;
+    }
+
+    private findMatchesForContext(
+        patterns: OperationPattern[], 
+        context: string
+    ): OperationPattern[] {
+        // First get exact context matches
+        const exactMatches = patterns.filter(p => p.context === context);
+        if (exactMatches.length > 0) return exactMatches;
+
+        // Then get partial context matches
+        return patterns.filter(p => 
+            p.context && (
+                p.context.includes(context) || 
+                context.includes(p.context)
+            )
+        );
+    }
+
+    async validateAndTrackPattern(
+        patternId: number,
+        result: any,
+        context: string,
+        changes?: string[]
+    ): Promise<void> {
+        await this.patternStorage.validatePattern(patternId, result, context);
+        
+        if (changes?.length) {
+            await this.patternStorage.trackEvolution(
+                patternId,
+                changes,
+                result.success ? 'success' : 'failure'
+            );
+        }
+    }
+
+    async getPatternInsights(patternId: number): Promise<{
+        evolution: Array<{changes: string[], outcome: ExecutionOutcome}>;
+        history: {successes: number, failures: number, adaptations: string[]};
+    }> {
+        const evolution = await this.patternStorage.getPatternEvolution(patternId);
+        const history = await this.learningStorage.getPatternHistory(patternId);
+        
+        return { evolution, history };
+    }
 }

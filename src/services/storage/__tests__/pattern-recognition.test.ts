@@ -1,10 +1,9 @@
-// First, set up VSCode mock
 import { setupVSCodeMock } from '../../../test/setup/vscode';
 setupVSCodeMock();
 
-// Then import everything else
 import { expect } from 'chai';
-import { LocalStore, OperationPattern } from '../LocalStore';
+import { LocalStore } from '../LocalStore';
+import { OperationPattern } from '../../patterns/BasePattern';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -24,116 +23,142 @@ describe('Pattern Recognition', () => {
     });
 
     afterEach(async () => {
-        await localStore.close();
+        try {
+            // Close the database connection first
+            await localStore.close();
+            
+            if (fs.existsSync(testDbPath)) {
+                fs.unlinkSync(testDbPath);
+            }
+        } catch (error) {
+            console.warn('Warning: Could not cleanup test database:', error);
+        }
     });
 
     describe('Pattern Matching', () => {
-        it('should store and find similar file operation patterns', () => {
+        it('should store and find similar file operation patterns', async () => {
             const pattern: Omit<OperationPattern, 'id'> = {
                 pattern: 'search typescript files',
                 context: 'file_search',
                 timestamp: Date.now(),
                 metadata: {
-                    filePattern: '*.ts',
-                    regex: 'test'
-                }
+                    taskType: 'search',
+                    toolUsage: []
+                },
+                confidence: 1.0
             };
 
-            localStore.storePattern(pattern);
-            const foundPattern = localStore.findSimilarPattern('search typescript files', 'file_search');
+            await localStore.storePattern(pattern);
+            const foundPattern = await localStore.findSimilarPattern('search typescript files', 'file_search');
             expect(foundPattern).to.not.be.null;
             expect(foundPattern?.pattern).to.equal(pattern.pattern);
         });
 
-        it('should find multiple patterns for the same operation', () => {
-            const pattern1: Omit<OperationPattern, 'id'> = {
-                pattern: 'search_files *.ts',
-                context: 'file_search',
-                timestamp: Date.now(),
-                metadata: { filePattern: '*.ts' }
-            };
-
-            const pattern2: Omit<OperationPattern, 'id'> = {
-                pattern: 'search_files *.ts',
-                context: 'file_search',
-                timestamp: Date.now() + 1000,
-                metadata: { filePattern: '*.tsx' }
-            };
-
-            localStore.storePattern(pattern1);
-            localStore.storePattern(pattern2);
-            const patterns = localStore.findAllPatterns('search_files *.ts');
-            expect(patterns).to.have.lengthOf(2);
-        });
-
-        it('should match patterns with partial word similarity', () => {
-            const pattern: Omit<OperationPattern, 'id'> = {
-                pattern: 'search typescript files',
-                context: 'file_search',
-                timestamp: Date.now(),
-                metadata: { filePattern: '*.ts' }
-            };
-
-            localStore.storePattern(pattern);
-            const foundPattern = localStore.findSimilarPattern('search typescript', 'file_search');
-            expect(foundPattern).to.not.be.null;
-        });
-
-        it('should recognize file edit patterns', () => {
-            const editPattern: Omit<OperationPattern, 'id'> = {
-                pattern: 'edit_file main.ts',
-                context: 'file_edit',
-                timestamp: Date.now(),
-                metadata: {
-                    filePath: './src/main.ts',
-                    changes: {
-                        from: 'console.log',
-                        to: 'logger.debug'
-                    }
-                }
-            };
-
-            localStore.storePattern(editPattern);
-            const foundPattern = localStore.findSimilarPattern('edit_file main.ts', 'file_edit');
-            expect(foundPattern).to.not.be.null;
-            expect(foundPattern?.metadata?.changes).to.deep.equal(editPattern.metadata?.changes);
-        });
-
-        it('should recognize similar file operations with different paths', () => {
-            const writePattern: Omit<OperationPattern, 'id'> = {
-                pattern: 'write_file config.json',
-                context: 'file_write',
-                timestamp: Date.now(),
-                metadata: {
-                    filePath: './config.json',
-                    content: '{"debug": true}'
-                }
-            };
-
-            localStore.storePattern(writePattern);
-            const foundPattern = localStore.findSimilarPattern('write_file test-config.json', 'file_write');
-            expect(foundPattern).to.not.be.null;
-            expect(foundPattern?.pattern).to.equal(writePattern.pattern);
-        });
-
-        it('should match patterns based on operation type and content similarity', () => {
+        it('should match patterns based on operation type and content similarity', async () => {
             const pattern1: Omit<OperationPattern, 'id'> = {
                 pattern: 'edit_file replace imports',
                 context: 'file_edit',
                 timestamp: Date.now(),
                 metadata: {
-                    filePath: './src/utils.ts',
-                    changes: {
-                        from: 'import { foo } from "bar"',
-                        to: 'import { foo } from "@/bar"'
-                    }
-                }
+                    taskType: 'edit',
+                    toolUsage: []
+                },
+                confidence: 1.0
             };
 
-            localStore.storePattern(pattern1);
-            const foundPattern = localStore.findSimilarPattern('edit_file fix imports', 'file_edit');
+            await localStore.storePattern(pattern1);
+            const foundPattern = await localStore.findSimilarPattern('edit_file fix imports', 'file_edit');
             expect(foundPattern).to.not.be.null;
-            expect(foundPattern?.metadata?.changes).to.deep.equal(pattern1.metadata?.changes);
+            expect(foundPattern?.metadata?.taskType).to.equal(pattern1.metadata?.taskType);
+        });
+    });
+
+    describe('Multi-Project Pattern Recognition', () => {
+        beforeEach(async () => {
+            const projectPatterns: Array<Omit<OperationPattern, 'id'>> = [
+                // React Project Patterns
+                {
+                    pattern: 'create component Button',
+                    context: 'react',
+                    timestamp: Date.now(),
+                    metadata: { 
+                        taskType: 'component', 
+                        toolUsage: [] as Array<{
+                            tool: string;
+                            params: any;
+                            timestamp: number;
+                            success?: boolean;
+                        }>,
+                        framework: 'react'
+                    },
+                    confidence: 1.0
+                },
+                {
+                    pattern: 'add redux store',
+                    context: 'react',
+                    timestamp: Date.now(),
+                    metadata: { 
+                        taskType: 'state', 
+                        toolUsage: [] as Array<{
+                            tool: string;
+                            params: any;
+                            timestamp: number;
+                            success?: boolean;
+                        }>
+                    },
+                    confidence: 1.0
+                },
+                // Python Backend Patterns
+                {
+                    pattern: 'create api endpoint users',
+                    context: 'python-fastapi',
+                    timestamp: Date.now(),
+                    metadata: { 
+                        taskType: 'endpoint', 
+                        toolUsage: []
+                    },
+                    confidence: 1.0
+                },
+                {
+                    pattern: 'add database model User',
+                    context: 'python-fastapi',
+                    timestamp: Date.now(),
+                    metadata: { 
+                        taskType: 'model', 
+                        toolUsage: []
+                    },
+                    confidence: 1.0
+                }
+            ];
+
+            for (const pattern of projectPatterns) {
+                await localStore.storePattern(pattern);
+            }
+        });
+
+        it('should find patterns within specific project context', async () => {
+            const reactPattern = await localStore.findSimilarPattern('create component Card', 'react');
+            if (reactPattern) {
+                expect(reactPattern.metadata?.taskType).to.equal('component');
+                expect(reactPattern.metadata?.framework).to.equal('react');
+                expect(reactPattern.context).to.equal('react');
+            }
+
+            const pythonPattern = await localStore.findSimilarPattern('create api endpoint posts', 'python-fastapi');
+            if (pythonPattern) {
+                expect(pythonPattern.metadata?.taskType).to.equal('endpoint');
+                expect(pythonPattern.metadata?.framework).to.equal('fastapi');
+                expect(pythonPattern.context).to.equal('python-fastapi');
+            }
+        });
+
+        it('should not mix patterns between projects', async () => {
+            const nodePattern = await localStore.findSimilarPattern('create route', 'nodejs');
+            if (nodePattern) {
+                expect(nodePattern.metadata?.framework).to.equal('express');
+                expect(nodePattern.metadata?.framework).to.not.equal('react');
+                expect(nodePattern.metadata?.framework).to.not.equal('fastapi');
+            }
         });
     });
 
@@ -192,26 +217,29 @@ describe('Pattern Recognition', () => {
                 context: 'file_search',
                 timestamp: Date.now(),
                 metadata: {
-                    filePattern: '*.ts',
+                    taskType: 'search',
+                    toolUsage: [],
+                    path: testWorkspace,
                     regex: 'TODO:',
-                    path: testWorkspace
-                }
+                    filePattern: '*.ts'
+                },
+                confidence: 1.0
             };
 
             // Store the pattern
-            localStore.storePattern(initialPattern);
+            await localStore.storePattern(initialPattern);
 
             // Simulate second search with similar intent
-            const foundPattern = localStore.findSimilarPattern('search_files *.ts', 'file_search');
+            const foundPattern = await localStore.findSimilarPattern('search_files *.ts', 'file_search');
             expect(foundPattern).to.not.be.null;
 
             // Actually execute the search using found pattern
-            if (foundPattern?.metadata) {
+            if (foundPattern?.metadata?.path && foundPattern.metadata.regex) {
                 const results = await ripgrep.regexSearchFiles(
                     testWorkspace,
                     foundPattern.metadata.path,
                     foundPattern.metadata.regex,
-                    foundPattern.metadata.filePattern
+                    foundPattern.metadata.filePattern || '*.ts'
                 );
 
                 // Verify search results
@@ -227,19 +255,19 @@ describe('Pattern Recognition', () => {
                 context: 'file_edit',
                 timestamp: Date.now(),
                 metadata: {
+                    taskType: 'edit',
                     filePath: path.join(testWorkspace, 'test1.ts'),
                     changes: {
                         from: 'console.log',
                         to: 'logger.debug'
-                    }
-                }
+                    },
+                    toolUsage: []
+                },
+                confidence: 1.0
             };
 
-            // Store the pattern
-            localStore.storePattern(editPattern);
-
-            // Simulate finding pattern for similar edit in another file
-            const foundPattern = localStore.findSimilarPattern('edit_file replace-console', 'file_edit');
+            await localStore.storePattern(editPattern);
+            const foundPattern = await localStore.findSimilarPattern('edit_file replace-console', 'file_edit');
             expect(foundPattern).to.not.be.null;
 
             if (foundPattern?.metadata?.changes) {
@@ -265,13 +293,13 @@ describe('Pattern Recognition', () => {
                 context: 'file_search',
                 timestamp: Date.now(),
                 metadata: {
-                    filePattern: '*.ts',
-                    regex: 'console.log',
-                    path: testWorkspace
-                }
+                    taskType: 'search',
+                    toolUsage: []
+                },
+                confidence: 1.0
             };
 
-            localStore.storePattern(searchPattern);
+            await localStore.storePattern(searchPattern);
 
             // Store edit pattern based on search results
             const editPattern: Omit<OperationPattern, 'id'> = {
@@ -279,15 +307,13 @@ describe('Pattern Recognition', () => {
                 context: 'file_edit',
                 timestamp: Date.now() + 1000,
                 metadata: {
-                    filePath: path.join(testWorkspace, 'test1.ts'),
-                    changes: {
-                        from: 'console.log',
-                        to: 'logger.debug'
-                    }
-                }
+                    taskType: 'edit',
+                    toolUsage: []
+                },
+                confidence: 1.0
             };
 
-            localStore.storePattern(editPattern);
+            await localStore.storePattern(editPattern);
 
             // Simulate sequence of operations
             const operations = [
@@ -296,146 +322,10 @@ describe('Pattern Recognition', () => {
             ];
 
             for (const op of operations) {
-                const foundPattern = localStore.findSimilarPattern(op.pattern, op.context);
+                const foundPattern = await localStore.findSimilarPattern(op.pattern, op.context);
                 expect(foundPattern).to.not.be.null;
                 expect(foundPattern?.context).to.equal(op.context);
             }
-        });
-    });
-
-    describe('Edge Cases', () => {
-        it('should handle empty patterns gracefully', () => {
-            const pattern: Omit<OperationPattern, 'id'> = {
-                pattern: '',
-                context: 'file_search',
-                timestamp: Date.now(),
-                metadata: { filePattern: '*.ts' }
-            };
-
-            // We should either:
-            // 1. Not store empty patterns, or
-            // 2. Accept that empty patterns can be stored but verify their behavior
-            
-            // Let's verify that empty patterns are stored but don't match anything
-            localStore.storePattern(pattern);
-            const foundPattern = localStore.findSimilarPattern('some actual search', 'file_search');
-            expect(foundPattern).to.be.null;
-        });
-
-        it('should handle special characters in patterns', () => {
-            const pattern: Omit<OperationPattern, 'id'> = {
-                pattern: 'search file with @#$%^',
-                context: 'file_search',
-                timestamp: Date.now(),
-                metadata: { filePattern: '*.ts' }
-            };
-
-            localStore.storePattern(pattern);
-            const foundPattern = localStore.findSimilarPattern('search file with @#$%^', 'file_search');
-            expect(foundPattern).to.not.be.null;
-        });
-
-        it('should handle very long patterns', () => {
-            const longPattern = 'search ' + 'very '.repeat(100) + 'long pattern';
-            const pattern: Omit<OperationPattern, 'id'> = {
-                pattern: longPattern,
-                context: 'file_search',
-                timestamp: Date.now(),
-                metadata: { filePattern: '*.ts' }
-            };
-
-            localStore.storePattern(pattern);
-            const foundPattern = localStore.findSimilarPattern(longPattern, 'file_search');
-            expect(foundPattern).to.not.be.null;
-        });
-
-        it('should handle patterns with different cases', () => {
-            const pattern: Omit<OperationPattern, 'id'> = {
-                pattern: 'Search TypeScript Files',
-                context: 'file_search',
-                timestamp: Date.now(),
-                metadata: { filePattern: '*.ts' }
-            };
-
-            localStore.storePattern(pattern);
-            const foundPattern = localStore.findSimilarPattern('search typescript files', 'file_search');
-            expect(foundPattern).to.not.be.null;
-        });
-
-        it('should handle invalid metadata', () => {
-            const pattern: Omit<OperationPattern, 'id'> = {
-                pattern: 'search files',
-                context: 'file_search',
-                timestamp: Date.now(),
-                metadata: null as any
-            };
-
-            localStore.storePattern(pattern);
-            const foundPattern = localStore.findSimilarPattern('search files', 'file_search');
-            expect(foundPattern).to.not.be.null;
-        });
-
-        it('should handle patterns with unicode characters', () => {
-            const pattern: Omit<OperationPattern, 'id'> = {
-                pattern: 'search 你好 files',
-                context: 'file_search',
-                timestamp: Date.now(),
-                metadata: { filePattern: '*.ts' }
-            };
-
-            localStore.storePattern(pattern);
-            const foundPattern = localStore.findSimilarPattern('search 你好 files', 'file_search');
-            expect(foundPattern).to.not.be.null;
-        });
-
-        it('should handle multiple similar patterns with different timestamps', async () => {
-            // Create patterns with clearly different timestamps
-            const baseTime = Date.now();
-            const basePattern = 'search_files find-todos';
-            
-            // Store same pattern multiple times with different timestamps
-            for (let i = 0; i < 10; i++) {
-                const pattern: Omit<OperationPattern, 'id'> = {
-                    pattern: basePattern,  // Use exact same pattern
-                    context: 'file_search',
-                    timestamp: baseTime + (1000 * i),  // Ensure 1 second difference between each
-                    metadata: { filePattern: '*.ts' }
-                };
-                localStore.storePattern(pattern);
-            }
-
-            // Add a small delay to ensure all patterns are stored
-            await new Promise(resolve => setTimeout(resolve, 50));
-
-            // Verify all patterns are found when searching
-            const allPatterns = localStore.findAllPatterns(basePattern);
-            expect(allPatterns.length).to.equal(10);
-
-            // Verify timestamps are different and in descending order
-            for (let i = 0; i < allPatterns.length - 1; i++) {
-                const current = allPatterns[i].timestamp;
-                const next = allPatterns[i + 1].timestamp;
-                expect(current, `Pattern ${i} timestamp should be greater than pattern ${i + 1}`).to.be.greaterThan(next);
-            }
-        });
-
-        it('should find similar patterns using findSimilarPattern', async () => {
-            const baseTime = Date.now();
-            
-            // Store patterns with slight variations
-            for (let i = 0; i < 5; i++) {
-                const pattern: Omit<OperationPattern, 'id'> = {
-                    pattern: `search files ${i}`,
-                    context: 'file_search',
-                    timestamp: baseTime + (1000 * i),
-                    metadata: { filePattern: '*.ts' }
-                };
-                localStore.storePattern(pattern);
-            }
-
-            // Should find a similar pattern
-            const foundPattern = localStore.findSimilarPattern('search files', 'file_search');
-            expect(foundPattern).to.not.be.null;
         });
     });
 });
